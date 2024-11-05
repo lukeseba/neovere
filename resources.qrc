@@ -1,0 +1,6 @@
+<!DOCTYPE RCC><RCC version="1.0">
+        <qresource>
+                <file>resources/fonts/november.ttf</file>
+                <file>resources/fonts/dotrice.otf</file>
+        </qresource>
+</RCC>
