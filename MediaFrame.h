@@ -8,6 +8,7 @@
 #include "MaintainFrame.h"
 #include <QMediaPlayer>
 #include <QVideoWidget>
+#include <QVBoxLayout>
 
 class MediaFrame: public MaintainFrame {
     Q_OBJECT
@@ -23,6 +24,7 @@ public:
 private:
     QMediaPlayer mediaPlayer;
     QVideoWidget videoWidget;
+    QVBoxLayout *layout;
     bool paused;
 };
 

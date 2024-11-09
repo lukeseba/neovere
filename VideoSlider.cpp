@@ -52,12 +52,13 @@ void VideoSlider::leaveEvent(QEvent *event) {
     QSlider::leaveEvent(event);
 }
 
-// CAN CRASH IF SLIDERUPDATETIMER IS NOT INITIALIZED YET
 void VideoSlider::sliderChange(SliderChange change) {
     if (change == SliderValueChange && !vidUpdate && !sliderUpdateTimer->isActive()) {
+        if (player->isPlaying()) {
+            player->pause();
+        }
         manualSliderUpdate = true;
         setVidPosition();
-        player->pause();
         sliderUpdateTimer->start();
     }
     QSlider::sliderChange(change);

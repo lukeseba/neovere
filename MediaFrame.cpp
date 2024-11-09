@@ -21,7 +21,7 @@ videoWidget(new QVideoWidget(this)) {
     this->paused = false;
 
     // set up layout to hold video widget
-    QVBoxLayout *layout = new QVBoxLayout(this);
+    layout = new QVBoxLayout(this);
     layout->addWidget(&videoWidget);
 
     // configure media player to the video widget
@@ -32,13 +32,17 @@ videoWidget(new QVideoWidget(this)) {
 
     // get media resolution when media is changed
     QObject::connect(&mediaPlayer, &QMediaPlayer::mediaStatusChanged, [&](QMediaPlayer::MediaStatus status) {
-        if (status == QMediaPlayer::LoadedMedia || status == QMediaPlayer::BufferedMedia) {
+        if (status == QMediaPlayer::LoadedMedia) {
             // get resolution from metadata
             QSize resolution = mediaPlayer.metaData().value(QMediaMetaData::Resolution).toSize();
             if (resolution.isValid()) {
                 aspectWidth = resolution.width();
                 aspectHeight = resolution.height();
-                resize(aspectWidth, aspectHeight);
+
+                std::cout << "bullshit" << std::endl;
+                // dont ask
+                resize(width()+1, height());
+                resize(width()-1, height());
             } else {
                 qDebug() << "Resolution is invalid";
             }

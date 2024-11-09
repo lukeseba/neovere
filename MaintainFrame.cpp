@@ -8,7 +8,6 @@ MaintainFrame::MaintainFrame(int w, int h, QWidget *parent)
 }
 
 void MaintainFrame::resizeEvent(QResizeEvent *event) {
-
     // Calculate the new width and   height while maintaining a 16:9 aspect ratio
     int newWidth = event->size().width();
     int newHeight = newWidth * aspectHeight / aspectWidth; // Maintain 16:9 ratio
