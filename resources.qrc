@@ -2,5 +2,7 @@
         <qresource>
                 <file>resources/fonts/november.ttf</file>
                 <file>resources/fonts/dotrice.otf</file>
+                <file>resources/fonts/apestron.ttf</file>
+                <file>resources/fonts/sofachrome.otf</file>
         </qresource>
 </RCC>

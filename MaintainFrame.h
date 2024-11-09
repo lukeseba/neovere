@@ -4,14 +4,16 @@
 #include <QFrame>
 #include <QResizeEvent>
 
-class MaintainFrame final : public QFrame {
+class MaintainFrame : public QFrame {
     Q_OBJECT // Needed for any QObject subclass
 
 public:
-    explicit MaintainFrame(QWidget *parent = nullptr); // Constructor declaration
+    explicit MaintainFrame(int w, int h, QWidget *parent = nullptr); // Constructor declaration
 
 protected:
     void resizeEvent(QResizeEvent *event) override; // Event handler declaration
+    int aspectWidth;
+    int aspectHeight;
 };
 
 #endif // MAINTAINFRAME_H

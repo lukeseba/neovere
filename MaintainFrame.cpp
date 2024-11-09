@@ -1,28 +1,30 @@
 #include "MaintainFrame.h"
 #include <iostream>
 
-MaintainFrame::MaintainFrame(QWidget *parent)
+MaintainFrame::MaintainFrame(int w, int h, QWidget *parent)
     : QFrame(parent) {
-    // Constructor implementation (can be empty if no custom logic is needed)
+    aspectWidth = w;
+    aspectHeight = h;
 }
 
 void MaintainFrame::resizeEvent(QResizeEvent *event) {
 
-    // Calculate the new width and height while maintaining a 16:9 aspect ratio
+    // Calculate the new width and   height while maintaining a 16:9 aspect ratio
     int newWidth = event->size().width();
-    int newHeight = newWidth * 9 / 16; // Maintain 16:9 ratio
+    int newHeight = newWidth * aspectHeight / aspectWidth; // Maintain 16:9 ratio
 
 
     // Ensure the height doesn't exceed the available size
-    if (newHeight > this->window()->frameGeometry().height()) {
-        newHeight = this->window()->frameGeometry().height();
-        newWidth = newHeight * 16 / 9;
+    if (newHeight > this->window()->frameGeometry().height()/1.2) {
+        newHeight = this->window()->frameGeometry().height()/1.2;
+        newWidth = newHeight * aspectWidth / aspectHeight;
     }
 
     // Resize the widget while maintaining the aspect ratio
 
+    resize(newWidth, newHeight);
     setMinimumHeight(newHeight);
     setMaximumHeight(newHeight);
 
-    QFrame::resizeEvent(event); // Call the base class implementation
+    QFrame::resizeEvent(event);
 }
