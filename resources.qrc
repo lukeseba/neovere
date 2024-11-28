@@ -4,5 +4,25 @@
                 <file>resources/fonts/dotrice.otf</file>
                 <file>resources/fonts/apestron.ttf</file>
                 <file>resources/fonts/sofachrome.otf</file>
+                <file>resources/fonts/pixcel.ttf</file>
+                <file>resources/fonts/2k12.ttf</file>
+                <file>resources/fonts/cfdots.ttf</file>
+                <file>resources/fonts/dotim3.ttf</file>
+                <file>resources/fonts/dotim5.ttf</file>
+                <file>resources/fonts/dotim7.ttf</file>
+                <file>resources/fonts/sucaba.ttf</file>
+                <file>resources/fonts/preforation.ttf</file>
+                <file>resources/fonts/sftel.ttf</file>
+                <file>resources/fonts/sftel_bold.ttf</file>
+                <file>resources/fonts/sftel_light.ttf</file>
+                <file>resources/fonts/sftel_lightbold.ttf</file>
+                <file>resources/fonts/GreaseBalls.ttf</file>
+                <file>resources/fonts/NiocTresni.ttf</file>
+                <file>resources/fonts/FifteenOkay.ttf</file>
+                <file>resources/fonts/synthetic.ttf</file>
+                <file>resources/fonts/ledpanel.ttf</file>
+                <file>resources/code/functions.py</file>
+                <file>resources/code/classes.py</file>
+                <file>resources/code/setVideo.py</file>
         </qresource>
 </RCC>

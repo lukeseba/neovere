@@ -16,7 +16,7 @@ VideoSlider::VideoSlider(QMediaPlayer *player, int sliderSize, QWidget *parent) 
     this->manualSliderUpdate = false;
 
     videoUpdateTimer->setInterval(100);
-    sliderUpdateTimer->setInterval(500);
+    sliderUpdateTimer->setInterval(250);
     videoUpdateTimer->setSingleShot(true);
     sliderUpdateTimer->setSingleShot(true);
 
@@ -28,6 +28,7 @@ VideoSlider::VideoSlider(QMediaPlayer *player, int sliderSize, QWidget *parent) 
                 this->setValue(int((position * sliderSize) / player->duration())); // Update slider position
                 vidUpdate = false;
                 videoUpdateTimer->start();
+                updateTimeStamp(int(position), player->duration());
             }
         }
     });
@@ -54,7 +55,7 @@ void VideoSlider::leaveEvent(QEvent *event) {
 
 void VideoSlider::sliderChange(SliderChange change) {
     if (change == SliderValueChange && !vidUpdate && !sliderUpdateTimer->isActive()) {
-        if (player->isPlaying()) {
+        if (player->playbackState() == QMediaPlayer::PlayingState) {
             player->pause();
         }
         manualSliderUpdate = true;
@@ -64,7 +65,19 @@ void VideoSlider::sliderChange(SliderChange change) {
     QSlider::sliderChange(change);
 }
 
-void VideoSlider::setVidPosition() {
+void VideoSlider::setVidPosition() const {
     player->setPosition((static_cast<qint64>(this->value()) * player->duration())/ sliderSize);
 }
+void VideoSlider::updateTimeStamp(int position, int duration) const {
+    if (button != nullptr) {
+        button->setText(convertToTimestamp(position)+" / "+convertToTimestamp(duration));
+    }
+}
 
+void VideoSlider::assignButton(QPushButton *button) {
+    this->button = button;
+}
+
+QString VideoSlider::convertToTimestamp(int seconds) {
+    return QVariant(seconds/60000).toString()+":" + (seconds/1000%60<10 ? "0" : "") + QVariant(seconds/1000%60).toString();
+}

@@ -39,7 +39,6 @@ videoWidget(new QVideoWidget(this)) {
                 aspectWidth = resolution.width();
                 aspectHeight = resolution.height();
 
-                std::cout << "bullshit" << std::endl;
                 // dont ask
                 resize(width()+1, height());
                 resize(width()-1, height());

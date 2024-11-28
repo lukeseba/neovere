@@ -9,6 +9,8 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6Widgets REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia MultimediaWidgets)
+find_package(OpenCV REQUIRED)
+include_directories(${OpenCV_INCLUDE_DIRS})
 
 set(SOURCES main.cpp MaintainFrame.cpp MaintainFrame.h
         MediaFrame.cpp
@@ -21,4 +23,4 @@ qt_add_resources(SOURCES resources.qrc)
 
 add_executable(SimpleQtApp ${SOURCES})
 
-target_link_libraries(SimpleQtApp PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets)
+target_link_libraries(SimpleQtApp PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets ${OpenCV_LIBS})
