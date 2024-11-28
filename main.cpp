@@ -124,67 +124,54 @@ void saveProjectToFile(QString programs[], QString videoPaths[],  QPlainTextEdit
     outputText->setPlainText("File "+ fileName +" saved successfully");
 }
 
-int compileCode(QString code, QPlainTextEdit *outputDisplay, MediaFrame *player, QString videoPath) {
-    QString addFiles[] = {"setVideo", "functions", "classes"};
+void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player, const QString& videoPath) {
+    // Create a persistent QProcess object for this function
+    QProcess* process = new QProcess();
+    QObject::connect(process, &QProcess::finished, process, &QProcess::deleteLater);
 
-    // Add extra functions to the code
+    // Prepare the Python script with additional code
+    QStringList addFiles{"setVideo", "functions", "classes"};
     QString fullCode = code;
-    for (const auto & addFile : addFiles) {
-        QFile file(":/resources/code/"+addFile+".py");
 
-        // Open the functions file in read-only mode
+    for (const auto& addFile : addFiles) {
+        QFile file(":/resources/code/" + addFile + ".py");
         if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            qDebug() << "Failed to open the resource file.";
-            return 1;
+            outputDisplay->appendPlainText("Error: Failed to open resource file: " + addFile);
+            return;
         }
-
-        // Read the file contents
         QTextStream in(&file);
         QString fileContent = in.readAll();
 
-        // Replace [path] with the value of videoPath if it exists
-        if (addFile == "setVideo") {
-            if (videoPath.isEmpty()) {
-                fileContent = "";
-            } else {
-                fileContent.replace("[path]", videoPath);
-            }
+        // Replace [path] with videoPath for "setVideo.py"
+        if (addFile == "setVideo" && !videoPath.isEmpty()) {
+            fileContent.replace("[path]", videoPath);
         }
 
-        // Prepend or append the file content to fullCode
         fullCode = fileContent + "\n" + fullCode;
     }
 
-    std::cout << fullCode.toStdString() << std::endl;
+    // Debug output of the compiled code
+    qDebug() << "Compiled Python Code:\n" << fullCode;
 
-    // Check if OpenCV is installed
-    QProcess process1;
-    QStringList checkArgs;
-    checkArgs << "-m" << "pip" << "show" << "opencv-python";
-    process1.start("python", checkArgs);
-    process1.waitForFinished();
+    // Run the Python script asynchronously
+    QObject::connect(process, &QProcess::readyReadStandardOutput, [process, outputDisplay]() {
+        QString output = process->readAllStandardOutput();
+        outputDisplay->appendPlainText(output);
+    });
 
-    QString output1 = process1.readAllStandardOutput();
-    if (output1.isEmpty()) {
-        // Install OpenCV if not found
-        QStringList installArgs;
-        installArgs << "-m" << "pip" << "install" << "opencv-python";
-        process1.start("python", installArgs);
-        process1.waitForFinished();
-    }
+    QObject::connect(process, &QProcess::readyReadStandardError, [process, outputDisplay]() {
+        QString error = process->readAllStandardError();
+        outputDisplay->appendPlainText("Error:\n" + error);
+    });
 
-    // use QProcess to run python code
-    QProcess process2;
+    QObject::connect(process, &QProcess::errorOccurred, [process, outputDisplay](QProcess::ProcessError error) {
+        outputDisplay->appendPlainText("Process error occurred: " + QString::number(error));
+    });
 
-    process2.start("python3", QStringList() << "-c" << fullCode);
-    process2.waitForFinished();
-
-    // Capture and display output
-    QString output2 = process2.readAllStandardOutput();
-    QString error = process2.readAllStandardError();
-    outputDisplay->setPlainText(output2 + error);
-    return 0;
+    // Run the Python code
+    process->start("python3", QStringList() << "-c" << fullCode);
 }
+
 
 void importVideo(QString fileName, QString &videoPath, QPlainTextEdit *outputDisplay, MediaFrame *mediaPanel) {
     videoPath = fileName;
