@@ -147,27 +147,45 @@ class FEllipse(Field):
             thickness
         )
 
+class FPoly(Field):
+    def __init__(self, points: np.ndarray):
+        super().__init__()
+
+        # Reshape the points for OpenCV (required shape: number_of_points x 1 x 2)
+        points = points.reshape((-1, 1, 2)).astype(np.int32)
+
+        # Draw the polygon outline
+        cv2.fillPoly(self._map, [points], color=255)
+
 class FAudio(Field):
-    def __init__(self, frame_index: int):
+    def __init__(self, frame_index: int, start: int=0, end: int=None):
         super().__init__()
         audio_data = audio.frame_audio(frame_index)
         volume = audio_data["volume"]
         freqs = audio_data["frequencies"]
         mags = audio_data["magnitude"]
+        if end == None:
+            end = len(freqs)
+        else:
+            end = int(end/5)
+        start = int(start/5)
 
-        # total_bars = 100
-        # bar_width = video.width()/(total_bars)
-        # # replace with polygon
-        # for i in range(total_bars-1):
-        #     self.add(FRect(
-        #         i*bar_width,
-        #         video.height()-200,
-        #         (i+1)*bar_width,
-        #         video.height()
-        #     ))
-        # self.add(FRect(
-        #     video.width()-bar_width,
-        #     video.height()-10*video.height(),
-        #     video.width(),
-        #     video.height()
-        # ))
+        total_bars = end-start
+        bar_width = video.width()/(total_bars)
+        points = np.array([], dtype=np.float32)
+        norm = max(mags)/video.height()
+
+        for i in range(start, end):
+           points = np.append(points, [i*bar_width+bar_width/2, video.height()-mags[i]/norm])
+        points = np.append(points, [video.width()-bar_width, video.height()])
+        points = np.append(points, [0, video.height()])
+        self.add(FPoly(
+            points
+        ))
+
+        self.add(FRect(
+            video.width()-bar_width,
+            video.height()-volume*video.height(),
+            video.width(),
+            video.height()
+        ))

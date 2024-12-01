@@ -247,30 +247,41 @@ class Audio:
 
 
     def frame_audio(self, frame_index):
-        """
-        Get audio data for a specific frame index.
-        """
-        # Calculate timestamp for the given frame index
-        timestamp = frame_index / self.fps
+        if (self._loaded == True):
+            return self._audio_data[frame_index]
+        else:
+            """
+            Get audio data for a specific frame index.
+            """
+            # Calculate timestamp for the given frame index
+            timestamp = frame_index / self.fps
 
 
-        # Extract a small audio segment
-        audio_path = self.extract_audio_segment(timestamp)
+            # Extract a small audio segment
+            audio_path = self.extract_audio_segment(timestamp)
 
 
-        # Analyze the audio data
-        audio_data = self.analyze_audio(audio_path)
+            # Analyze the audio data
+            audio_data = self.analyze_audio(audio_path)
 
 
-        # Clean up temporary audio file
-        os.remove(audio_path)
+            # Clean up temporary audio file
+            os.remove(audio_path)
 
 
-        return audio_data
+            return audio_data
 
-    def preload_audio_data(self):
+    def preload_data(self, frame_duration: int, reload: bool = False):
+        self._audio_data = []
+        if os.path.isfile(self.video_path+".npy") and reload == False:
+            self._audio_data = np.load(self.video_path+".npy", allow_pickle=True)
+        else:
+            for f in range(frame_duration):
+                self._audio_data.append(self.frame_audio(f))
+            np.save(self.video_path+".npy", self._audio_data)
+
         self._loaded = True
-        
+
 
 
 class NonlinearRenderer:

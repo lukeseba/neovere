@@ -222,6 +222,7 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
 
 
 void importVideo(QString fileName, QString &videoPath, QPlainTextEdit *outputDisplay, MediaFrame *mediaPanel) {
+    // preload audio data into file?
     videoPath = fileName;
     QFile file(fileName);
     outputDisplay->setPlainText("imported '"+fileName+"'");
