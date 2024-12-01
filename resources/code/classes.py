@@ -1,8 +1,11 @@
-from typing import List
+from noise import pnoise2
 import numpy as np
 import subprocess
 import os
-import shutil
+import copy
+from scipy.io import wavfile
+from scipy.fft import fft, fftfreq
+
 
 try:
     import cv2
@@ -57,21 +60,46 @@ class Frame:
         if pixels.ndim not in (2, 3):
             raise ValueError("Frame must be a 2D (grayscale) or 3D (color) array.")
 
-        self.pixels = pixels
+        self.pixels = pixels.astype(np.uint8)
 
     def __str__(self):
         """String representation for debugging."""
         return f"Frame with shape {self.pixels.shape}"
 
-    def get_pixel(self, x: int, y: int):
-        return Pixel(self.pixels[y][x][2], self.pixels[y][x][1], self.pixels[y][x][0])
+    def apply_filter(self, filter):
+        self.pixels = filter.apply(self.pixels.astype(np.uint16)).astype(np.uint8)
 
-    def set_pixel(self, x: int, y: int, pixel: Pixel):
-        self.pixels[y][x] = [round(pixel.b), round(pixel.g), round(pixel.r)]
+    def get_pixels(self):
+        return self.pixels.astype(np.uint16)
+
+    def modify(self, func):
+        """
+        Apply a user-defined function to the frame's pixels.
+        :param func: A function that takes x, y, and the current pixel (as a numpy array) and returns a new pixel.
+        """
+        height, width, _ = self.pixels.shape
+
+        # Generate x and y coordinate grids
+        x_coords, y_coords = np.meshgrid(np.arange(width), np.arange(height))
+
+        # Prepare a flattened view for efficient mapping
+        flat_pixels = self.pixels.reshape(-1, 3)
+        flat_x_coords = x_coords.flatten()
+        flat_y_coords = y_coords.flatten()
+
+        # Apply the function vectorized
+        new_flat_pixels = np.array([
+            func(x, y, pixel)
+            for x, y, pixel in zip(flat_x_coords, flat_y_coords, flat_pixels)
+        ])
+
+        # Reshape back to the original frame shape
+        self.pixels = new_flat_pixels.reshape(height, width, 3).astype(np.uint8)
+
 
     def preview(self, wait_for_exit: bool = False, title: str = "Frame Preview"):
         # Show the frame (optional)
-        window_name = "frame"
+        window_name = title
         cv2.imshow(window_name, self.pixels)
         if (wait_for_exit):
             # Keep checking if the window is closed
@@ -134,6 +162,112 @@ class Video:
     def height(self):
         return self.__height
 
+    def frame_audio(self, index: int):
+        pass
+
+class Audio:
+    def __init__(self, video_path):
+        """
+        Initialize the Audio object with the path to the video file.
+        """
+        self.video_path = video_path
+        # Extract the FPS of the video for frame-to-timestamp conversion
+        self.fps = self._get_fps()
+
+
+    def _get_fps(self):
+        """
+        Use FFmpeg to extract the frames per second (FPS) of the video.
+        """
+        command = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate",
+            "-of", "csv=p=0",
+            self.video_path
+        ]
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        fps_data = result.stdout.strip()
+        num, denom = map(int, fps_data.split('/'))
+        return num / denom
+
+
+    def extract_audio_segment(self, timestamp, duration=0.2):
+        """
+        Extract a small segment of audio around the given timestamp.
+        """
+        output_audio = "temp_audio.wav"
+        command = [
+            "ffmpeg", "-y",  # Overwrite existing files
+            "-i", self.video_path,  # Input video
+            "-vn",  # Exclude video
+            "-ac", "1",  # Mono audio
+            "-ar", "44100",  # Sampling rate
+            "-ss", str(timestamp),  # Start time
+            "-t", str(duration),  # Duration
+            output_audio
+        ]
+        subprocess.run(command, check=True)
+        return output_audio
+
+
+    def analyze_audio(self, audio_path):
+        """
+        Analyze the audio data and return volume and frequency spectrum.
+        """
+        sample_rate, audio_data = wavfile.read(audio_path)
+
+
+        # Normalize audio if it's in 16-bit PCM
+        if audio_data.dtype == np.int16:
+            audio_data = audio_data / 32768.0
+
+
+        # Compute volume (RMS)
+        volume = np.sqrt(np.mean(audio_data ** 2))
+
+
+        # Compute frequency spectrum
+        n = len(audio_data)
+        yf = fft(audio_data)
+        xf = fftfreq(n, 1 / sample_rate)
+
+
+        # Only keep positive frequencies
+        positive_frequencies = xf[:n // 2]
+        magnitude = np.abs(yf[:n // 2])
+
+
+        return {
+            "volume": volume,
+            "frequencies": positive_frequencies,
+            "magnitude": magnitude
+        }
+
+
+    def frame_audio(self, frame_index):
+        """
+        Get audio data for a specific frame index.
+        """
+        # Calculate timestamp for the given frame index
+        timestamp = frame_index / self.fps
+
+
+        # Extract a small audio segment
+        audio_path = self.extract_audio_segment(timestamp)
+
+
+        # Analyze the audio data
+        audio_data = self.analyze_audio(audio_path)
+
+
+        # Clean up temporary audio file
+        os.remove(audio_path)
+
+
+        return audio_data
+
+
 class NonlinearRenderer:
     def __init__(self, vid: Video):
         self.__video = vid
@@ -187,7 +321,6 @@ class NonlinearRenderer:
         print("Video compiled with audio as final_render.mp4")
 
     def __attach_audio(self, rendered_video: str, original_video: str, output_video: str):
-        """Attach the original video's audio to the rendered video using FFmpeg."""
         audio_file = "temp_audio.aac"
 
         # Extract audio from the original video
@@ -199,7 +332,9 @@ class NonlinearRenderer:
             "-acodec", "aac",  # Save as AAC format
             audio_file
         ]
+        print("Extract audio command:", " ".join(extract_audio_command))  # Debug log
         subprocess.run(extract_audio_command, check=True)
+
 
         # Combine audio with the rendered video
         combine_audio_command = [
@@ -212,7 +347,9 @@ class NonlinearRenderer:
             "-shortest",  # Stop when the shortest stream ends
             output_video
         ]
+        print("Combine audio command:", " ".join(combine_audio_command))  # Debug log
         subprocess.run(combine_audio_command, check=True)
+
 
         # Clean up temporary audio file
         os.remove(audio_file)

@@ -24,5 +24,7 @@
                 <file>resources/code/functions.py</file>
                 <file>resources/code/classes.py</file>
                 <file>resources/code/setVideo.py</file>
+                <file>resources/code/fields.py</file>
+                <file>resources/code/filters.py</file>
         </qresource>
 </RCC>

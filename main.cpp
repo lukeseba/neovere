@@ -30,6 +30,9 @@
 #include "MediaFrame.h"
 #include "VideoSlider.h"
 
+QProcess* process = nullptr;
+
+
 // Function to load a custom font and return a QFont object
 QFont setFont(const QString &fontPath, int fontSize = 12) {
     int fontId = QFontDatabase::addApplicationFont(fontPath);
@@ -125,12 +128,25 @@ void saveProjectToFile(QString programs[], QString videoPaths[],  QPlainTextEdit
 }
 
 void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player, const QString& videoPath) {
-    // Create a persistent QProcess object for this function
-    QProcess* process = new QProcess();
-    QObject::connect(process, &QProcess::finished, process, &QProcess::deleteLater);
+    // clean process if it already exists
+    if (process != nullptr) {
+        if (process->state() == QProcess::Running) {
+            process->terminate();
+            if (!process->waitForFinished(3000)) {
+                process->kill();
+            }
+        }
+        delete process;
+        process = nullptr;
+    }
+
+    // create a new qprocess
+    process = new QProcess();
+
+    outputDisplay->appendPlainText("Compiling video ...");
 
     // Prepare the Python script with additional code
-    QStringList addFiles{"setVideo", "functions", "classes"};
+    QStringList addFiles{"filters", "fields", "setVideo", "functions", "classes"};
     QString fullCode = code;
 
     for (const auto& addFile : addFiles) {
@@ -151,7 +167,12 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
     }
 
     // Debug output of the compiled code
-    qDebug() << "Compiled Python Code:\n" << fullCode;
+    //qDebug() << "Compiled Python Code:\n" << fullCode;
+
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    process->setProcessEnvironment(env);
+    //qDebug() << "System Path: " << env.value("PATH");
+    QString pythonExecutable = "python"; // Or full path to python.exe on Windows
 
     // Run the Python script asynchronously
     QObject::connect(process, &QProcess::readyReadStandardOutput, [process, outputDisplay]() {
@@ -165,11 +186,38 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
     });
 
     QObject::connect(process, &QProcess::errorOccurred, [process, outputDisplay](QProcess::ProcessError error) {
-        outputDisplay->appendPlainText("Process error occurred: " + QString::number(error));
-    });
+        QString errorMsg;
+        switch (error) {
+            case QProcess::FailedToStart:
+                errorMsg = "Failed to start: The executable could not be found or is not executable.";
+                break;
+            case QProcess::Crashed:
+                errorMsg = "Crashed: The process crashed after starting.";
+                break;
+            case QProcess::Timedout:
+                errorMsg = "Timed out: The process timed out.";
+                break;
+            case QProcess::WriteError:
+                errorMsg = "Write error: Unable to write to the process.";
+                break;
+            case QProcess::ReadError:
+                errorMsg = "Read error: Unable to read from the process.";
+                break;
+            case QProcess::UnknownError:
+                default:
+                    errorMsg = "Unknown error occurred.";
+                    break;
+            }
+            outputDisplay->appendPlainText("Process error occurred: " + errorMsg);
+        });
 
     // Run the Python code
-    process->start("python3", QStringList() << "-c" << fullCode);
+    process->start(pythonExecutable, QStringList() << "-c" << fullCode);
+
+    // Check if the process starts successfully
+    if (!process->waitForStarted()) {
+        outputDisplay->appendPlainText("Failed to start process. Check your command and environment.");
+    }
 }
 
 
@@ -272,7 +320,7 @@ int main(int argc, char *argv[]) {
     // Create code output panel
     QPlainTextEdit *outputDisplay = new QPlainTextEdit;
     outputDisplay->setReadOnly(true);
-    outputDisplay->setPlainText("OUTPUT");
+    outputDisplay->setPlaceholderText("OUTPUT");
     outputDisplay->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding); // Set policy to expand vertically
 
     // Create media controls
@@ -312,8 +360,8 @@ int main(int argc, char *argv[]) {
     rightWidget->setLayout(rightLayout);
 
     // Add the panels to the layout
-    mainLayout->addWidget(leftWidget, 10);
-    mainLayout->addWidget(rightWidget, 18);
+    mainLayout->addWidget(leftWidget, 1);
+    mainLayout->addWidget(rightWidget, 1);
 
     // set font
     codePanel->setFont(dotrice);

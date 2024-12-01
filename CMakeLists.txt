@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.5)
 project(SimpleQtApp)
 
 set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_PREFIX_PATH "C:/Qt/6.8.0/mingw_64;C:/opencv/build/x64/vc16/lib")
+
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
@@ -9,6 +11,7 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6Widgets REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia MultimediaWidgets)
+
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
