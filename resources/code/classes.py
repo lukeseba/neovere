@@ -173,6 +173,7 @@ class Audio:
         self.video_path = video_path
         # Extract the FPS of the video for frame-to-timestamp conversion
         self.fps = self._get_fps()
+        self._loaded = False
 
 
     def _get_fps(self):
@@ -266,6 +267,10 @@ class Audio:
 
 
         return audio_data
+
+    def preload_audio_data(self):
+        self._loaded = True
+        
 
 
 class NonlinearRenderer:

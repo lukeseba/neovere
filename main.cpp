@@ -172,7 +172,7 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     process->setProcessEnvironment(env);
     //qDebug() << "System Path: " << env.value("PATH");
-    QString pythonExecutable = "python"; // Or full path to python.exe on Windows
+    QString pythonExecutable = "python3"; // Or full path to python.exe on Windows
 
     // Run the Python script asynchronously
     QObject::connect(process, &QProcess::readyReadStandardOutput, [process, outputDisplay]() {

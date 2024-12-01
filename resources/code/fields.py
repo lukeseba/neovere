@@ -10,9 +10,9 @@ class Field:
 
     def add(self, other):
         if isinstance(other, Field):
-            return self._map(other.get_map())
+            return self.add(other.get_map())
         else:
-            self._map = np.clip(self._map.astype(np.int16) + other, 0, 255).astype(np.uint8)
+            self._map = np.clip(self._map.astype(np.int16) + other*255, 0, 255).astype(np.uint8)
             return self
     def sub(self, other):
         if isinstance(other, Field):
@@ -70,9 +70,9 @@ class Field:
         self._map = map
 
 class FOverlay(Field):
-    def __init__(self):
+    def __init__(self, opacity: int = 1.0):
         super().__init__()
-        self._map = np.full((video.height(), video.width()), 255, dtype=np.uint8)
+        self._map = np.full((video.height(), video.width()), opacity*255, dtype=np.uint8)
 
 class FPerlin(Field):
     def __init__(self, seed: int = 0, scale: int = 100, octaves: int = 4, persistence: int = 0.2, lacunarity: int = 2.0, contrast: int = 0.0, midpoint=0.5):
@@ -111,3 +111,63 @@ class FLine(Field):
     def __init__(self, x1, y1, x2, y2, thickness):
         super().__init__()
         cv2.line(self._map,(int(x1), int(y1)), (int(x2), int(y2)), 255, int(thickness))
+
+class FRect(Field):
+    def __init__(self, x1, y1, x2, y2, thickness = -1):
+        super().__init__()
+        cv2.rectangle(self._map,(int(x1), int(y1)), (int(x2), int(y2)), 255, int(thickness))
+
+class FEllipse(Field):
+    def __init__(self, center, ellipse_width, ellipse_height, angle=0, thickness=-1):
+        """
+        Initialize an FEllipse object, automatically drawing the ellipse onto the map.
+
+        Parameters:
+        - width (int): Width of the field (canvas).
+        - height (int): Height of the field (canvas).
+        - center (tuple): The (x, y) center of the ellipse.
+        - ellipse_width (int): The total width of the ellipse (bounding box width).
+        - ellipse_height (int): The total height of the ellipse (bounding box height).
+        - angle (float): The rotation angle of the ellipse in degrees (default 0).
+        - thickness (int): Thickness of the ellipse border (-1 for filled ellipse, default).
+        """
+        super().__init__()
+
+        # Convert width and height to axes (semi-width and semi-height)
+        axes = (ellipse_width // 2, ellipse_height // 2)
+
+        # Draw the ellipse directly on the map
+        cv2.ellipse(
+            self._map,
+            center,
+            axes,
+            angle,
+            0, 360,  # Full ellipse
+            255,  # White ellipse
+            thickness
+        )
+
+class FAudio(Field):
+    def __init__(self, frame_index: int):
+        super().__init__()
+        audio_data = audio.frame_audio(frame_index)
+        volume = audio_data["volume"]
+        freqs = audio_data["frequencies"]
+        mags = audio_data["magnitude"]
+
+        # total_bars = 100
+        # bar_width = video.width()/(total_bars)
+        # # replace with polygon
+        # for i in range(total_bars-1):
+        #     self.add(FRect(
+        #         i*bar_width,
+        #         video.height()-200,
+        #         (i+1)*bar_width,
+        #         video.height()
+        #     ))
+        # self.add(FRect(
+        #     video.width()-bar_width,
+        #     video.height()-10*video.height(),
+        #     video.width(),
+        #     video.height()
+        # ))
