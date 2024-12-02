@@ -21,6 +21,7 @@
                 <file>resources/fonts/FifteenOkay.ttf</file>
                 <file>resources/fonts/synthetic.ttf</file>
                 <file>resources/fonts/ledpanel.ttf</file>
+                <file>resources/fonts/arial-bold.ttf</file>
                 <file>resources/code/functions.py</file>
                 <file>resources/code/classes.py</file>
                 <file>resources/code/setVideo.py</file>

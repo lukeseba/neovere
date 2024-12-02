@@ -5,7 +5,8 @@ import os
 import copy
 from scipy.io import wavfile
 from scipy.fft import fft, fftfreq
-
+from PIL import Image, ImageDraw, ImageFont
+from PyQt5.QtCore import QFile
 
 try:
     import cv2
@@ -171,10 +172,10 @@ class Audio:
         Initialize the Audio object with the path to the video file.
         """
         self.video_path = video_path
-        # Extract the FPS of the video for frame-to-timestamp conversion
         self.fps = self._get_fps()
+        self.sample_rate = 44100  # Standard audio sample rate
+        self._audio_data = None
         self._loaded = False
-
 
     def _get_fps(self):
         """
@@ -192,96 +193,121 @@ class Audio:
         num, denom = map(int, fps_data.split('/'))
         return num / denom
 
-
-    def extract_audio_segment(self, timestamp, duration=0.2):
+    def _extract_full_audio(self):
         """
-        Extract a small segment of audio around the given timestamp.
+        Extract the entire audio track from the video using FFmpeg.
         """
-        output_audio = "temp_audio.wav"
+        output_audio = "full_audio.wav"
         command = [
             "ffmpeg", "-y",  # Overwrite existing files
             "-i", self.video_path,  # Input video
             "-vn",  # Exclude video
             "-ac", "1",  # Mono audio
-            "-ar", "44100",  # Sampling rate
-            "-ss", str(timestamp),  # Start time
-            "-t", str(duration),  # Duration
+            "-ar", str(self.sample_rate),  # Set sampling rate
             output_audio
         ]
         subprocess.run(command, check=True)
+
+        # Ensure the audio file is created and has data
+        if not os.path.isfile(output_audio) or os.path.getsize(output_audio) == 0:
+            raise ValueError("Failed to extract audio. The file is empty or not created.")
+
         return output_audio
 
-
-    def analyze_audio(self, audio_path):
+    def _load_audio_data(self):
         """
-        Analyze the audio data and return volume and frequency spectrum.
+        Load the full audio data into memory from the extracted audio file.
         """
+        audio_path = self._extract_full_audio()
         sample_rate, audio_data = wavfile.read(audio_path)
 
+        # Clean up temporary file
+        os.remove(audio_path)
 
-        # Normalize audio if it's in 16-bit PCM
+        # Normalize audio if in 16-bit PCM format
         if audio_data.dtype == np.int16:
             audio_data = audio_data / 32768.0
 
+        # Ensure audio data is not empty
+        if len(audio_data) == 0:
+            raise ValueError("Audio data is empty. Check the input video for a valid audio track.")
 
-        # Compute volume (RMS)
-        volume = np.sqrt(np.mean(audio_data ** 2))
-
-
-        # Compute frequency spectrum
-        n = len(audio_data)
-        yf = fft(audio_data)
-        xf = fftfreq(n, 1 / sample_rate)
-
-
-        # Only keep positive frequencies
-        positive_frequencies = xf[:n // 2]
-        magnitude = np.abs(yf[:n // 2])
-
-
-        return {
-            "volume": volume,
-            "frequencies": positive_frequencies,
-            "magnitude": magnitude
-        }
-
-
-    def frame_audio(self, frame_index):
-        if (self._loaded == True):
-            return self._audio_data[frame_index]
-        else:
-            """
-            Get audio data for a specific frame index.
-            """
-            # Calculate timestamp for the given frame index
-            timestamp = frame_index / self.fps
-
-
-            # Extract a small audio segment
-            audio_path = self.extract_audio_segment(timestamp)
-
-
-            # Analyze the audio data
-            audio_data = self.analyze_audio(audio_path)
-
-
-            # Clean up temporary audio file
-            os.remove(audio_path)
-
-
-            return audio_data
+        return audio_data
 
     def preload_data(self, frame_duration: int, reload: bool = False):
-        self._audio_data = []
-        if os.path.isfile(self.video_path+".npy") and reload == False:
-            self._audio_data = np.load(self.video_path+".npy", allow_pickle=True)
+        """
+        Preload audio data for all frames, mapping audio segments to frames.
+        Results are cached in an .npy file for faster reloading.
+
+        Parameters:
+        - frame_duration (int): Total number of frames in the video.
+        - reload (bool): Force reloading and recalculation of audio data.
+        """
+        cache_file = f"{self.video_path}.npy"
+
+        if os.path.isfile(cache_file) and not reload:
+            # Load preprocessed data from cache
+            self._audio_data = np.load(cache_file, allow_pickle=True)
         else:
-            for f in range(frame_duration):
-                self._audio_data.append(self.frame_audio(f))
-            np.save(self.video_path+".npy", self._audio_data)
+            # Extract and preprocess audio data
+            audio_data = self._load_audio_data()
+            samples_per_frame = int(self.sample_rate / self.fps)
+            self._audio_data = []
+
+            for i in range(frame_duration):
+                start_idx = i * samples_per_frame
+                end_idx = start_idx + samples_per_frame
+
+                # Adjust indices to ensure they stay within bounds
+                if start_idx >= len(audio_data):
+                    break  # Stop if the start index exceeds the audio data length
+                if end_idx > len(audio_data):
+                    end_idx = len(audio_data)  # Clamp end index to the audio length
+
+                frame_audio = audio_data[start_idx:end_idx]
+
+                # Handle cases where frame_audio is empty (e.g., last frame)
+                if len(frame_audio) == 0:
+                    break
+
+                # Compute volume and frequency spectrum
+                volume = np.sqrt(np.mean(frame_audio ** 2))
+                yf = fft(frame_audio)
+                xf = fftfreq(len(frame_audio), 1 / self.sample_rate)
+
+                positive_frequencies = xf[:len(yf) // 2]
+                magnitude = np.abs(yf[:len(yf) // 2])
+
+                self._audio_data.append({
+                    "volume": volume,
+                    "frequencies": positive_frequencies,
+                    "magnitude": magnitude
+                })
+
+            # Save preprocessed data to cache
+            np.save(cache_file, self._audio_data)
 
         self._loaded = True
 
+
+
+    def frame_audio(self, frame_index):
+        """
+        Get preloaded audio data for a specific frame.
+
+        Parameters:
+        - frame_index (int): The index of the frame.
+
+        Returns:
+        - dict: A dictionary containing 'volume', 'frequencies', and 'magnitude'.
+        """
+        if not self._loaded:
+            raise ValueError("Audio data not preloaded. Call `preload_data()` first.")
+        if (frame_index < len(self._audio_data)):
+            return self._audio_data[frame_index]
+        else:
+            return self._audio_data[len(self._audio_data)-1]
+    
 
 
 class NonlinearRenderer:

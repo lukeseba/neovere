@@ -29,6 +29,8 @@
 #include "MaintainFrame.h"
 #include "MediaFrame.h"
 #include "VideoSlider.h"
+#include <QTemporaryFile>
+
 
 QProcess* process = nullptr;
 
@@ -49,6 +51,32 @@ QFont setFont(const QString &fontPath, int fontSize = 12) {
         return QFont(); // Return a default QFont if no families are found
     }
 }
+
+QString exportFontResourceToFile(const QString& resourcePath) {
+    QFile fontFile(resourcePath);  // Path to the resource
+    if (!fontFile.open(QIODevice::ReadOnly)) {
+        qWarning() << "Failed to load font resource.";
+        return QString();
+    }
+
+    // Specify a path for the exported font file
+    QString tempFilePath = QDir::tempPath() + "/arial-bold.ttf";
+
+    QFile outputFile(tempFilePath);
+    if (!outputFile.open(QIODevice::WriteOnly)) {
+        qWarning() << "Failed to create font file at temporary location.";
+        return QString();
+    }
+
+    // Write the contents of the resource file to the temporary file
+    outputFile.write(fontFile.readAll());
+    fontFile.close();
+    outputFile.close();
+
+    return tempFilePath;  // Return the path to the temporary file
+}
+
+
 
 void listResourceFiles(const QString &path = ":/") {
     QDirIterator it(path, QDirIterator::Subdirectories);
@@ -161,6 +189,7 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
         // Replace [path] with videoPath for "setVideo.py"
         if (addFile == "setVideo" && !videoPath.isEmpty()) {
             fileContent.replace("[path]", videoPath);
+            fileContent.replace("[arial]", exportFontResourceToFile(":/resources/fonts/arial-bold.ttf"));
         }
 
         fullCode = fileContent + "\n" + fullCode;
@@ -255,6 +284,7 @@ int main(int argc, char *argv[]) {
     QFont fifteenOkay = setFont(":/resources/fonts/FifteenOkay.ttf");
     QFont synthetic = setFont(":/resources/fonts/synthetic.ttf");
     QFont ledpanel = setFont(":/resources/fonts/ledpanel.ttf");
+    QFont arial = setFont(":/resources/fonts/arial-bold.ttf");
 
     // project data
     QString videoPath;

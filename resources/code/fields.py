@@ -1,6 +1,7 @@
 class Field:
     def __init__(self):
         self._map = np.zeros((video.height(), video.width()), dtype = np.uint8)
+        self.inverted = False
 
     def get(self, x: int, y: int):
         return (self._map[y][x] / 255).astype(np.float16)
@@ -63,11 +64,120 @@ class Field:
             clone.set_map(np.clip(self._map.astype(np.float16) / other, 0, 255).astype(np.uint8))
             return clone
 
+    def invert(self):
+        self._map = 255 - self._map
+        self.inverted = not self.inverted
+        return self
+
+
+    def move(self, x: int, y: int):
+        """
+        Efficiently shift the _map by (x, y) using OpenCV.
+        Pixels shifted outside the bounds are filled with 0s or 1s based on `self.inverted`.
+
+        :param x: Amount to shift in the x-direction (positive is right, negative is left).
+        :param y: Amount to shift in the y-direction (positive is down, negative is up).
+        """
+        # Determine the fill value based on inversion
+        fill_value = 255 if self.inverted else 0
+
+        # Create the transformation matrix for shifting
+        translation_matrix = np.float32([[1, 0, x], [0, 1, y]])
+
+        # Apply the translation
+        self._map = cv2.warpAffine(
+            self._map, translation_matrix,
+            (self._map.shape[1], self._map.shape[0]),  # Output size
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=fill_value
+        )
+        return self
+
+
+    def resize(self, width: int, height: int):
+        """
+        Resize the _map to the specified width and height using OpenCV.
+        - If the new size is larger, fill new areas with 0s or 1s depending on `self.inverted`.
+        - If the new size is smaller, crop the current map.
+
+        :param width: New width of the _map.
+        :param height: New height of the _map.
+        """
+        # Determine the fill value based on inversion
+        fill_value = 255 if self.inverted else 0
+
+        # If expanding, create a new map filled with the fill value
+        if width > self._map.shape[1] or height > self._map.shape[0]:
+            # Create a larger map filled with the fill value
+            new_map = np.full((height, width), fill_value, dtype=np.uint8)
+            # Determine the overlap region
+            overlap_x_end = min(self._map.shape[1], width)
+            overlap_y_end = min(self._map.shape[0], height)
+            # Copy the old map into the new map
+            new_map[:overlap_y_end, :overlap_x_end] = self._map[:overlap_y_end, :overlap_x_end]
+            self._map = new_map
+        else:
+            # Use OpenCV to resize the map directly if shrinking or reshaping
+            self._map = cv2.resize(self._map, (width, height), interpolation=cv2.INTER_AREA)
+
+        return self
+
+    def fit(self):
+        """
+        Stretches the region of interest (ROI) containing all the `255`s (or `0`s if inverted) to the edges of the canvas.
+        """
+        # Determine the target value based on whether the field is inverted
+        target_value = 0 if self.inverted else 255
+
+        # Find the bounding box of the region containing the target value
+        coords = cv2.findNonZero((self._map == target_value).astype(np.uint8))
+        if coords is None:
+            return self  # If no target value exists, do nothing
+
+        # Get the bounding box (x, y, width, height) of the region
+        x, y, w, h = cv2.boundingRect(coords)
+
+        # Extract the region of interest (ROI)
+        roi = self._map[y:y+h, x:x+w]
+
+        # Resize the ROI to fit the full canvas size
+        resized_roi = cv2.resize(roi, (self._map.shape[1], self._map.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+        # Fill the map with the resized ROI
+        self._map = resized_roi
+
+        # Ensure binary values remain consistent after stretching
+        if not self.inverted:
+            self._map[self._map != 255] = 0  # Enforce binary values: 255 for target, 0 otherwise
+        else:
+            self._map[self._map != 0] = 255  # Enforce binary values: 0 for target, 255 otherwise
+
+        return self
+
+
     def get_map(self):
         return self._map.astype(np.float16) / 255
 
     def set_map(self, map: np.ndarray):
         self._map = map
+
+    def blur(self, param: tuple = (5, 5)):
+        self._map = cv2.blur(self._map, param)
+        return self
+
+    def mirror_x(self):
+        """
+        Mirror the field along the x-axis (horizontal flip).
+        """
+        self._map = cv2.flip(self._map, 1)  # Flip around the vertical axis
+        return self
+
+    def mirror_y(self):
+        """
+        Mirror the field along the y-axis (vertical flip).
+        """
+        self._map = cv2.flip(self._map, 0)  # Flip around the horizontal axis
+        return self
 
 class FOverlay(Field):
     def __init__(self, opacity: int = 1.0):
@@ -157,35 +267,139 @@ class FPoly(Field):
         # Draw the polygon outline
         cv2.fillPoly(self._map, [points], color=255)
 
-class FAudio(Field):
-    def __init__(self, frame_index: int, start: int=0, end: int=None):
+class FText(Field):
+    def __init__(self, text: str, position: tuple, font_scale: float, thickness: int = 1, custom_font=None):
+        """
+        Initialize an FText object, automatically drawing the text onto the map.
+
+        Parameters:
+        - text (str): The text to render.
+        - position (tuple): The (x, y) position for the center of the text.
+        - font_scale (float): Scale of the text.
+        - thickness (int): Thickness of the text strokes for OpenCV font.
+        - custom_font (str or None): Path to a custom TTF font file. If None, uses OpenCV's default font.
+        """
         super().__init__()
-        audio_data = audio.frame_audio(frame_index)
-        volume = audio_data["volume"]
-        freqs = audio_data["frequencies"]
-        mags = audio_data["magnitude"]
-        if end == None:
-            end = len(freqs)
+
+        if custom_font:
+            # Use Pillow for custom fonts
+            self._draw_with_pillow(text, position, font_scale, custom_font)
         else:
-            end = int(end/5)
-        start = int(start/5)
+            # Fall back to OpenCV's putText
+            self._draw_with_opencv(text, position, font_scale, thickness)
 
-        total_bars = end-start
-        bar_width = video.width()/(total_bars)
-        points = np.array([], dtype=np.float32)
-        norm = max(mags)/video.height()
+    def _draw_with_pillow(self, text, position, font_scale, custom_font):
+        """Draw the text using Pillow and a custom font."""
+        # Convert the Field map to a Pillow image
+        pil_image = Image.fromarray(self._map)
 
-        for i in range(start, end):
-           points = np.append(points, [i*bar_width+bar_width/2, video.height()-mags[i]/norm])
-        points = np.append(points, [video.width()-bar_width, video.height()])
-        points = np.append(points, [0, video.height()])
-        self.add(FPoly(
-            points
-        ))
+        # Create a drawing context
+        draw = ImageDraw.Draw(pil_image)
 
-        self.add(FRect(
-            video.width()-bar_width,
-            video.height()-volume*video.height(),
-            video.width(),
-            video.height()
-        ))
+        # Load the custom font
+        font_size = int(font_scale * 20)  # Scale font size appropriately
+        font = ImageFont.truetype(custom_font, font_size)
+
+        # Calculate text size and alignment using font.getbbox()
+        text_bbox = font.getbbox(text)  # (left, top, right, bottom)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+
+        # Calculate the top-left corner position for center alignment
+        bottom_left_x = int(position[0] - text_width / 2)
+        bottom_left_y = int(position[1] - text_height / 2)
+
+        # Draw the text
+        draw.text((bottom_left_x, bottom_left_y), text, font=font, fill=255)
+
+        # Convert the Pillow image back to a NumPy array
+        self._map = np.array(pil_image)
+
+    def _draw_with_opencv(self, text, position, font_scale, thickness):
+        """Draw the text using OpenCV's putText."""
+        # Calculate the text size
+        (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+
+        # Calculate the bottom-left corner position for center alignment
+        bottom_left_x = int(position[0] - text_width / 2)
+        bottom_left_y = int(position[1] + text_height / 2)
+
+        # Draw the text centered on the map
+        cv2.putText(
+            self._map,
+            text,
+            (bottom_left_x, bottom_left_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            255,  # White text
+            thickness,
+            lineType=cv2.LINE_AA
+        )
+
+
+
+class FAudio(Field):
+    def __init__(self, frame_index: int, aud: Audio = audio, start: int = 0, end: int = None):
+        super().__init__()
+        try:
+            # Retrieve audio data
+            audio_data = aud.frame_audio(frame_index)
+            if not audio_data or not audio_data["frequencies"].size or not audio_data["magnitude"].size:
+                print(f"Invalid or missing audio data at frame {frame_index}")
+                return
+
+            # Extract data
+            volume = audio_data["volume"]
+            freqs = audio_data["frequencies"]
+            mags = audio_data["magnitude"]
+
+            # Handle start and end indices
+            if end is None:
+                end = len(freqs)
+            else:
+                end = int(end / 5)
+            start = int(start / 5)
+
+            if end > len(freqs):
+                end = len(freqs)
+            if start < 0 or start >= len(freqs):
+                print(f"Invalid range: start={start}, end={end} at frame {frame_index}")
+                return
+
+            # Ensure mags is non-empty and valid
+            if mags.size == 0 or np.all(mags == 0):
+                print(f"No valid magnitude data at frame {frame_index}")
+                return
+
+            norm = max(mags) / video.height()
+            if norm == 0 or np.isnan(norm) or np.isinf(norm):
+                print(f"Normalization error at frame {frame_index}, mags={mags}")
+                return
+
+            # Create visualization
+            total_bars = end - start
+            bar_width = video.width() / total_bars
+            points = []
+
+            for i in range(start, end):
+                x = i * bar_width + bar_width / 2
+                y = video.height() - mags[i] / norm
+                points.extend([x, y])
+
+            points.extend([
+                video.width() - bar_width, video.height(),
+                0, video.height()
+            ])
+
+            self.add(FPoly(np.array(points, dtype=np.float32)))
+
+            # Add volume indicator
+            self.add(FRect(
+                video.width() - bar_width,
+                video.height() - volume * video.height(),
+                video.width(),
+                video.height()
+            ))
+
+        except Exception as e:
+            print(f"Error initializing FAudio for frame {frame_index}: {e}")
