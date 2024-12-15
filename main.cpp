@@ -314,6 +314,17 @@ int main(int argc, char *argv[]) {
     window.setWindowTitle("NEOVERE");
     window.resize(1200, 560);
 
+    // Color Palette
+    QPalette palette = window.palette();
+    QColor nvWhite = QColor(250, 250, 255);
+    palette.setColor(QPalette::Window, nvWhite);
+    palette.setColor(QPalette::Button, Qt::white);
+    palette.setColor(QPalette::ButtonText, Qt::black);
+    palette.setColor(QPalette::Base, Qt::white);
+    palette.setColor(QPalette::Text, Qt::black);
+    window.setPalette(palette);
+    window.setAutoFillBackground(true);
+
     // Create a layout for the window
     QHBoxLayout *mainLayout = new QHBoxLayout(&window);
     QVBoxLayout *rightLayout = new QVBoxLayout();

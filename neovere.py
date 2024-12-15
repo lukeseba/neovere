@@ -17,7 +17,7 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_path = "/home/lukebalfanz/GitHub/neovere/seed.mp4"
+_path = ""
 arial = "/tmp/arial-bold.ttf"
 class Pixel:
     def __init__(self, r: int, g: int, b: int):
