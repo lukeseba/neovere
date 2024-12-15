@@ -27,5 +27,7 @@
                 <file>resources/code/setVideo.py</file>
                 <file>resources/code/fields.py</file>
                 <file>resources/code/filters.py</file>
+                <file>resources/code/footer.py</file>
+                <file>resources/code/header.py</file>
         </qresource>
 </RCC>

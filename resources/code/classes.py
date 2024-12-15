@@ -1,21 +1,3 @@
-from noise import pnoise2
-import numpy as np
-import subprocess
-import os
-import copy
-from scipy.io import wavfile
-from scipy.fft import fft, fftfreq
-from PIL import Image, ImageDraw, ImageFont
-from PyQt5.QtCore import QFile
-
-try:
-    import cv2
-except ImportError:
-    print("Error: OpenCV is not installed. Please install it using `pip install opencv-python`.")
-    exit(1)
-
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-
 class Pixel:
     def __init__(self, r: int, g: int, b: int):
         self.r = r
@@ -164,6 +146,12 @@ class Video:
         return self.__height
 
     def frame_audio(self, index: int):
+        pass
+
+    def apply_filter(self, start: int, end: int):
+        # get 4D array of frames
+        # get 4D array of filters
+
         pass
 
 class Audio:

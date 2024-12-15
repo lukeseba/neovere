@@ -1,4 +1,6 @@
 #include <iostream>
+#include <fstream>
+
 #include <QApplication>
 #include <QWidget>
 #include <QHBoxLayout>
@@ -31,6 +33,8 @@
 #include "VideoSlider.h"
 #include <QTemporaryFile>
 
+#include "PythonHighlighter.h"
+#include "PythonCodeEditor.h"
 
 QProcess* process = nullptr;
 
@@ -89,7 +93,7 @@ bool openProjectFromFile(QStringList* programs, QStringList* videoPaths,  QPlain
     QString fileName = QFileDialog::getOpenFileName(nullptr, "Open File", "", "NEOVERE Files (*.nv);;All Files (*)");
     if (!fileName.isEmpty()) {
         QFile file(fileName);
-        outputText->setPlainText("imported '"+fileName+"'");
+        outputText->appendPlainText("opened '"+fileName+"'");
 
         // Open the file for reading
         if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -155,8 +159,45 @@ void saveProjectToFile(QString programs[], QString videoPaths[],  QPlainTextEdit
     outputText->setPlainText("File "+ fileName +" saved successfully");
 }
 
+QString combinePythonFiles(const QStringList &fileNames) {
+    QString combinedCode;
+
+    for (const QString &fileName : fileNames) {
+        QString filePath = ":/resources/code/" + fileName + ".py";
+
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            qDebug() << "Failed to open file:" << filePath;
+            continue; // Skip this file, but try others
+        }
+
+        QTextStream in(&file);
+        combinedCode += in.readAll() + "\n"; // Add file content to combined code
+        file.close();
+    }
+
+    return combinedCode;
+}
+
+void remakeNeoverePy(QString &videoPath) {
+    QStringList pythonFiles = {
+        "header",
+        "classes",
+        "functions",
+        "setVideo",
+        "fields",
+        "filters",
+        "footer"};
+    std::ofstream outFile("neovere.py");
+    QString fileString = combinePythonFiles(pythonFiles);
+    fileString.replace("[%$#path#$%]", videoPath);
+    fileString.replace("[%$#arial#$%]", exportFontResourceToFile(":/resources/fonts/arial-bold.ttf"));
+    outFile << fileString.toStdString();
+    outFile.close();
+}
+
 void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player, const QString& videoPath) {
-    // clean process if it already exists
+    // Clean up any existing process
     if (process != nullptr) {
         if (process->state() == QProcess::Running) {
             process->terminate();
@@ -168,53 +209,30 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
         process = nullptr;
     }
 
-    // create a new qprocess
     process = new QProcess();
 
     outputDisplay->appendPlainText("Compiling video ...");
 
-    // Prepare the Python script with additional code
-    QStringList addFiles{"filters", "fields", "setVideo", "functions", "classes"};
-    QString fullCode = code;
+    // Add import for neovere.py
+    QString fullCode = /*QString("import neovere\n") +*/ code;
 
-    for (const auto& addFile : addFiles) {
-        QFile file(":/resources/code/" + addFile + ".py");
-        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            outputDisplay->appendPlainText("Error: Failed to open resource file: " + addFile);
-            return;
-        }
-        QTextStream in(&file);
-        QString fileContent = in.readAll();
-
-        // Replace [path] with videoPath for "setVideo.py"
-        if (addFile == "setVideo" && !videoPath.isEmpty()) {
-            fileContent.replace("[path]", videoPath);
-            fileContent.replace("[arial]", exportFontResourceToFile(":/resources/fonts/arial-bold.ttf"));
-        }
-
-        fullCode = fileContent + "\n" + fullCode;
-    }
-
-    // Debug output of the compiled code
-    //qDebug() << "Compiled Python Code:\n" << fullCode;
-
+    // Set up environment
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     process->setProcessEnvironment(env);
-    //qDebug() << "System Path: " << env.value("PATH");
-    QString pythonExecutable = "python3"; // Or full path to python.exe on Windows
+    QString pythonExecutable = "python3"; // Adjust for Windows if needed
 
-    // Run the Python script asynchronously
-    QObject::connect(process, &QProcess::readyReadStandardOutput, [process, outputDisplay]() {
+    // Connect process output signals
+    QObject::connect(process, &QProcess::readyReadStandardOutput, [outputDisplay]() {
         QString output = process->readAllStandardOutput();
         outputDisplay->appendPlainText(output);
     });
 
-    QObject::connect(process, &QProcess::readyReadStandardError, [process, outputDisplay]() {
+    QObject::connect(process, &QProcess::readyReadStandardError, [outputDisplay]() {
         QString error = process->readAllStandardError();
         outputDisplay->appendPlainText("Error:\n" + error);
     });
 
-    QObject::connect(process, &QProcess::errorOccurred, [process, outputDisplay](QProcess::ProcessError error) {
+    QObject::connect(process, &QProcess::errorOccurred, [outputDisplay](QProcess::ProcessError error) {
         QString errorMsg;
         switch (error) {
             case QProcess::FailedToStart:
@@ -233,12 +251,12 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
                 errorMsg = "Read error: Unable to read from the process.";
                 break;
             case QProcess::UnknownError:
-                default:
-                    errorMsg = "Unknown error occurred.";
-                    break;
-            }
-            outputDisplay->appendPlainText("Process error occurred: " + errorMsg);
-        });
+            default:
+                errorMsg = "Unknown error occurred.";
+                break;
+        }
+        outputDisplay->appendPlainText("Process error occurred: " + errorMsg);
+    });
 
     // Run the Python code
     process->start(pythonExecutable, QStringList() << "-c" << fullCode);
@@ -250,14 +268,16 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
 }
 
 
+
 void importVideo(QString fileName, QString &videoPath, QPlainTextEdit *outputDisplay, MediaFrame *mediaPanel) {
-    // preload audio data into file?
     videoPath = fileName;
     QFile file(fileName);
-    outputDisplay->setPlainText("imported '"+fileName+"'");
+    outputDisplay->appendPlainText("imported '"+fileName+"'");
 
     mediaPanel->setVideo(fileName);
     mediaPanel->playVideo();
+
+    remakeNeoverePy(videoPath);
 }
 
 int main(int argc, char *argv[]) {
@@ -331,10 +351,12 @@ int main(int argc, char *argv[]) {
     bottomButtonWidget->setLayout(bottomButtonLayout);
 
     // Create the code panel
-    QPlainTextEdit *codePanel = new QPlainTextEdit;
+    QPlainTextEdit *codePanel = new PythonCodeEditor;
     codePanel->setPlaceholderText("INPUT"); // Set placeholder text
     codePanel->setLineWrapMode(QPlainTextEdit::NoWrap);
     codePanel->setFrameStyle(QFrame::Box | QFrame::Sunken);
+
+    new PythonHighlighter(codePanel->document());
 
     // Create the left panel
     leftLayout->addWidget(topButtonWidget);
@@ -398,6 +420,10 @@ int main(int argc, char *argv[]) {
     codePanel->setFont(dotrice);
     outputDisplay->setFont(dotrice);
 
+    // generote neovere.py file
+    remakeNeoverePy(videoPath);
+
+
     // --------------- CONNECTIONS ---------------------
 
     // Make run button run python code
@@ -420,11 +446,8 @@ int main(int argc, char *argv[]) {
         QStringList videos;
 
         if(openProjectFromFile(&programs, &videos, outputDisplay)) {
-            videoPath = videos.at(0);
-
             codePanel->setPlainText(programs.at(0));
-            mediaPanel->setVideo(videos.at(0));
-            mediaPanel->playVideo();
+            importVideo(videos.at(0), videoPath, outputDisplay, mediaPanel);
         }
     });
 
