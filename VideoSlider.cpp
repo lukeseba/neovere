@@ -1,10 +1,11 @@
+// VideoSlider.cpp
 //
 // Created by lukebalfanz on 11/7/24.
 //
 
 #include "VideoSlider.h"
-#include <iostream>
-#include <qevent.h>
+#include <QPainter>
+#include <QStyleOptionSlider>
 
 VideoSlider::VideoSlider(QMediaPlayer *player, int sliderSize, QWidget *parent) : QSlider(Qt::Horizontal, parent) {
     this->player = player;
@@ -32,6 +33,40 @@ VideoSlider::VideoSlider(QMediaPlayer *player, int sliderSize, QWidget *parent) 
             }
         }
     });
+
+    setMouseTracking(true); // Enable hover detection
+}
+
+void VideoSlider::paintEvent(QPaintEvent *event) {
+    Q_UNUSED(event);
+
+    QPainter painter(this);
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+
+    // Background: rounded rectangle with bluish-purplish grey
+    QRect trackRect = rect().adjusted(5, 0, -5, 0); // Adjusted to make the slider taller
+    painter.setRenderHint(QPainter::Antialiasing);
+    QColor background = underMouse() ? QColor(140, 150, 170) : QColor(120, 130, 150); // Highlight on hover
+    int playheadWidth = underMouse() ? 8 : 4;
+    painter.setBrush(background); // Bluish-purplish grey (darker when hovered)
+    painter.setPen(Qt::NoPen);
+    painter.drawRoundedRect(trackRect, 2, 2);
+
+    // Filled area to the left of the playhead: pastel muted purple
+    QRect filledRect = QRect(trackRect.left(), trackRect.top(),
+                              (value() - minimum()) * trackRect.width() / (maximum() - minimum()),
+                              trackRect.height());
+    painter.setBrush(QColor(185, 205, 230)); // Pastel muted blue
+    painter.drawRoundedRect(filledRect, 2, 2);
+
+    // Playhead: white line with a hint of blue
+    int playheadX = trackRect.left() +
+                    (value() - minimum()) * trackRect.width() / (maximum() - minimum());
+    QRect playheadRect(playheadX - 2 - playheadWidth/2, trackRect.top(), playheadWidth, trackRect.height());
+    painter.setPen(Qt::gray);
+    painter.setBrush(QColor(250, 250, 255)); // White with a hint of pink
+    painter.drawRect(playheadRect);
 }
 
 void VideoSlider::mousePressEvent(QMouseEvent *event) {
@@ -47,9 +82,11 @@ void VideoSlider::mouseReleaseEvent(QMouseEvent *event) {
     QSlider::mouseReleaseEvent(event);
 }
 void VideoSlider::enterEvent(QEnterEvent *event) {
+    update(); // Trigger repaint to apply hover highlight
     QSlider::enterEvent(event);
 }
 void VideoSlider::leaveEvent(QEvent *event) {
+    update(); // Trigger repaint to remove hover highlight
     QSlider::leaveEvent(event);
 }
 

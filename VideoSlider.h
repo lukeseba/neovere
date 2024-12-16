@@ -36,6 +36,8 @@ protected:
 
 protected:
     static QString convertToTimestamp(int seconds);
+
+    void paintEvent(QPaintEvent *event) override;
 };
 
 

@@ -13,10 +13,12 @@ public:
         : QSyntaxHighlighter(parent), inMultilineComment(false) {
         HighlightingRule rule;
 
+        // Set default text color to dark grey
+        defaultTextFormat.setForeground(QColor(100, 90, 110)); // Dark grey color
+
         // Keywords
         QTextCharFormat keywordFormat;
         keywordFormat.setForeground(Qt::blue);
-        keywordFormat.setFontWeight(QFont::Bold);
         const QStringList keywordPatterns = {
             "\\bclass\\b", "\\bdef\\b", "\\breturn\\b", "\\bif\\b", "\\belse\\b", "\\bimport\\b",
             "\\bwhile\\b", "\\bfor\\b", "\\bin\\b", "\\btry\\b", "\\bglobal\\b", "\\bexcept\\b",
@@ -43,12 +45,12 @@ public:
 
         // Function definitions
         functionDefFormat.setForeground(Qt::darkMagenta);
-        functionDefFormat.setFontItalic(true);
+        functionDefFormat.setFontWeight(QFont::Bold);
         functionDefPattern = QRegularExpression("^\\s*def\\s+(\\w+)\\s*\\(([^)]*)\\)");
 
         // Class definitions
         classDefFormat.setForeground(Qt::darkRed);
-        classDefFormat.setFontItalic(true);
+        classDefFormat.setFontWeight(QFont::Bold);
         classDefPattern = QRegularExpression("^\\s*class\\s+(\\w+)\\b");
 
         // Function calls
@@ -110,6 +112,9 @@ public:
 
 protected:
     void highlightBlock(const QString &text) override {
+        // Apply default format to the entire block
+        setFormat(0, text.length(), defaultTextFormat);
+
         // Highlight multi-line comments
         setCurrentBlockState(0);
         if (inMultilineComment) {
@@ -190,4 +195,6 @@ private:
     QTextCharFormat functionCallFormat;
 
     QTextCharFormat enumFormat; // For enums
+
+    QTextCharFormat defaultTextFormat;
 };

@@ -22,6 +22,7 @@
 #include <QVideoWidget>
 #include <QSlider>
 #include <QTimer>
+#include <QMessageBox>
 
 #include <QUrl>
 #include <opencv2/opencv.hpp>
@@ -107,7 +108,7 @@ bool openProjectFromFile(QStringList* programs, QStringList* videoPaths,  QPlain
 
         file.close();
         for (int i = 1; i < lines.size(); i++) {
-            if (lines.at(i) == "<>") {
+            if (lines.at(i)     == "<>") {
                 const int limit = i+3+lines.at(i+2).toInt();
                 videoPaths->append(lines.at(i+1));
                 QString program = "";
@@ -382,7 +383,10 @@ int main(int argc, char *argv[]) {
 
     // Create the right panel
     // create video headers
-    TabsWidget *mediaHeader = new TabsWidget(6);
+    TabsWidget *mediaHeader = new TabsWidget();
+    mediaHeader->setTabsFont(dotrice);
+    mediaHeader->addTab("Render", false);
+    mediaHeader->selectTab(0);
 
     // create media panel
     MediaFrame *mediaPanel = new MediaFrame;
@@ -439,7 +443,7 @@ int main(int argc, char *argv[]) {
     mainLayout->addWidget(rightWidget, 1);
 
     // set font
-    codePanel->setFont(dotrice);
+    codePanel->setFont(dotim5);
     outputDisplay->setFont(dotrice);
 
     // generote neovere.py file
@@ -477,8 +481,17 @@ int main(int argc, char *argv[]) {
 
     // make the new button open a new default file
     QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay]() {
+    QMessageBox confirmationDialog;
+    confirmationDialog.setWindowTitle("Confirm New Program");
+    confirmationDialog.setText("Are you sure you want to create a new program? Unsaved changes will be lost.");
+    confirmationDialog.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+    confirmationDialog.setDefaultButton(QMessageBox::No);
+
+    if (confirmationDialog.exec() == QMessageBox::Yes) {
         createNewFile(codePanel, outputDisplay);
-    });
+    }
+});
+
 
     // Make save button download file
     QObject::connect(saveButton, &QPushButton::clicked, [codePanel, outputDisplay, &videoPath]() {

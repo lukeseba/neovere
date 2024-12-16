@@ -32,6 +32,8 @@ set(SOURCES main.cpp MaintainFrame.cpp MaintainFrame.h
         LineNumberArea.h
         TabsWidget.cpp
         TabsWidget.h
+        TabButton.cpp
+        TabButton.h
 )
 qt_add_resources(SOURCES resources.qrc)
 

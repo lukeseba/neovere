@@ -1,36 +1,38 @@
-//
-// Created by lukebalfanz on 12/15/24.
-//
-
 #ifndef TABSWIDGET_H
 #define TABSWIDGET_H
-#include <qgridlayout.h>
-#include <qvectornd.h>
+
 #include <QWidget>
-#include <QPushButton>
+#include <QGridLayout>
+#include <QFont>
+#include "TabButton.h"
 
-
-class TabsWidget: public QWidget {
+class TabsWidget : public QWidget
+{
     Q_OBJECT
+
 public:
-    explicit TabsWidget(int columnCount, QWidget *parent = nullptr);
-    void addTab(QString name);
+    explicit TabsWidget(QWidget *parent = nullptr);
+    void addTab(const QString &tabName, bool closeable);
     void removeTab(int index);
-    int currentTab();
-    QString getTabName(int index);
+    void setTabsFont(const QFont &font); // Set font for all existing and future tabs
+    void selectTab(int index);
 
-protected:
-    void redraw();
+    signals:
+        void tabSelected(int index);
 
-    void addWidget(QWidget *button);
+private:
+    QGridLayout *layout;
+    QList<TabButton*> tabs;
+    QFont currentFont;  // Store the font for existing and future tabs
+    int maxColumns = 5; // Number of tabs per row before stacking vertically
+    int selectedTabIndex = -1; // Keeps track of the currently selected tab
 
-    QGridLayout * layout;
-    QVector2D currentPos;
-    int columnCount;
-    QWidgetList tabs;
-    int tabCount;
+    void updateTabGrid();
+    void deselectCurrentTab();
+
+    private slots:
+        void handleTabClicked(int index);
+    void handleTabCloseClicked(int index);
 };
 
-
-
-#endif //TABSWIDGET_H
+#endif // TABSWIDGET_H
