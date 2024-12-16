@@ -129,6 +129,8 @@ class Video:
         self.__width = int(self.__video.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.__height = int(self.__video.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+        self.audio = Audio(self.__video_path)
+
     def open(self):
         """Open the video file."""
         self.__video = cv2.VideoCapture(self.__video_path)
@@ -167,7 +169,9 @@ class Video:
         return self.__height
 
     def frame_audio(self, index: int):
-        pass
+        return self.audio.frame_audio(index)
+
+
 
     def apply_filter(self, start: int, end: int):
         # get 4D array of frames
@@ -298,8 +302,6 @@ class Audio:
 
         self._loaded = True
 
-
-
     def frame_audio(self, frame_index):
         """
         Get preloaded audio data for a specific frame.
@@ -313,11 +315,26 @@ class Audio:
         if not self._loaded:
             raise ValueError("Audio data not preloaded. Call `preload_data()` first.")
         if (frame_index < len(self._audio_data)):
-            return self._audio_data[frame_index]
+            return Frame_Audio(self._audio_data[frame_index])
         else:
-            return self._audio_data[len(self._audio_data)-1]
-    
+            return Frame_Audio(self._audio_data[len(self._audio_data)-1])
 
+class Frame_Audio:
+    def __init__(self, audio_data):
+        self._audio_data = audio_data
+        self.__freqs = self._audio_data["frequencies"]
+
+    def get_volume(self):
+        return self._audio_data["volume"]
+
+    def get_frequency(self, freq: int):
+        return self._audio_data["magnitude"][int(freq/(self.__freqs[1]-self.__freqs[0]))]
+
+    def list_frequencies(self):
+        return self.__freqs
+
+    def list_magnitudes(self):
+        return self._audio_data["magnitude"]
 
 class NonlinearRenderer:
     def __init__(self, vid: Video):
@@ -423,10 +440,11 @@ def read_font_from_qt_resource(resource_path):
     return temp_path
 if _path != "":
     video = Video(_path)
-    audio = Audio(_path)
     renderer = NonlinearRenderer(video)
     x_coords, y_coords = np.meshgrid(np.arange(video.width()), np.arange(video.height()))
     frame_indices = np.arange(video.frame_duration())
+
+    video.audio.preload_data(video.frame_duration())
 if _path != "":
     class Field:
         def __init__(self):
@@ -769,41 +787,28 @@ if _path != "":
 
 
     class FAudio(Field):
-        def __init__(self, frame_index: int, aud: Audio, start: int = 0, end: int = None):
+        def __init__(self, aud: Frame_Audio, start: int = 0, end: int = None):
             super().__init__()
             try:
-                # Retrieve audio data
-                audio_data = aud.frame_audio(frame_index)
-                if not audio_data or not audio_data["frequencies"].size or not audio_data["magnitude"].size:
-                    print(f"Invalid or missing audio data at frame {frame_index}")
-                    return
-
-                # Extract data
-                volume = audio_data["volume"]
-                freqs = audio_data["frequencies"]
-                mags = audio_data["magnitude"]
+                freqs = aud.list_frequencies()
+                mags = aud.list_magnitudes()
 
                 # Handle start and end indices
                 if end is None:
                     end = len(freqs)
                 else:
-                    end = int(end / 5)
-                start = int(start / 5)
+                    end = int(end / (aud.list_frequencies()[1]-aud.list_frequencies()[0]))
+                start = int(start / (aud.list_frequencies()[1]-aud.list_frequencies()[0]))
 
                 if end > len(freqs):
                     end = len(freqs)
                 if start < 0 or start >= len(freqs):
-                    print(f"Invalid range: start={start}, end={end} at frame {frame_index}")
-                    return
-
-                # Ensure mags is non-empty and valid
-                if mags.size == 0 or np.all(mags == 0):
-                    print(f"No valid magnitude data at frame {frame_index}")
+                    print(f"Invalid range: start={start}, end={end}")
                     return
 
                 norm = max(mags) / video.height()
                 if norm == 0 or np.isnan(norm) or np.isinf(norm):
-                    print(f"Normalization error at frame {frame_index}, mags={mags}")
+                    print(f"Normalization error, mags={mags}")
                     return
 
                 # Create visualization
@@ -826,13 +831,13 @@ if _path != "":
                 # Add volume indicator
                 self.add(FRect(
                     video.width() - bar_width,
-                    video.height() - volume * video.height(),
+                    video.height() - aud.get_volume() * video.height(),
                     video.width(),
                     video.height()
                 ))
 
             except Exception as e:
-                print(f"Error initializing FAudio for frame {frame_index}: {e}")
+                print(f"Error initializing FAudio: {e}")
 
 if _path != "":
     class Filter:

@@ -30,6 +30,8 @@ set(SOURCES main.cpp MaintainFrame.cpp MaintainFrame.h
         PythonCodeEditor.cpp
         PythonCodeEditor.h
         LineNumberArea.h
+        TabsWidget.cpp
+        TabsWidget.h
 )
 qt_add_resources(SOURCES resources.qrc)
 

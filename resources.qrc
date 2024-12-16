@@ -29,5 +29,6 @@
                 <file>resources/code/filters.py</file>
                 <file>resources/code/footer.py</file>
                 <file>resources/code/header.py</file>
+                <file>resources/code/default_project.py</file>
         </qresource>
 </RCC>

@@ -340,41 +340,28 @@ if _path != "":
 
 
     class FAudio(Field):
-        def __init__(self, frame_index: int, aud: Audio, start: int = 0, end: int = None):
+        def __init__(self, aud: Frame_Audio, start: int = 0, end: int = None):
             super().__init__()
             try:
-                # Retrieve audio data
-                audio_data = aud.frame_audio(frame_index)
-                if not audio_data or not audio_data["frequencies"].size or not audio_data["magnitude"].size:
-                    print(f"Invalid or missing audio data at frame {frame_index}")
-                    return
-
-                # Extract data
-                volume = audio_data["volume"]
-                freqs = audio_data["frequencies"]
-                mags = audio_data["magnitude"]
+                freqs = aud.list_frequencies()
+                mags = aud.list_magnitudes()
 
                 # Handle start and end indices
                 if end is None:
                     end = len(freqs)
                 else:
-                    end = int(end / 5)
-                start = int(start / 5)
+                    end = int(end / (aud.list_frequencies()[1]-aud.list_frequencies()[0]))
+                start = int(start / (aud.list_frequencies()[1]-aud.list_frequencies()[0]))
 
                 if end > len(freqs):
                     end = len(freqs)
                 if start < 0 or start >= len(freqs):
-                    print(f"Invalid range: start={start}, end={end} at frame {frame_index}")
-                    return
-
-                # Ensure mags is non-empty and valid
-                if mags.size == 0 or np.all(mags == 0):
-                    print(f"No valid magnitude data at frame {frame_index}")
+                    print(f"Invalid range: start={start}, end={end}")
                     return
 
                 norm = max(mags) / video.height()
                 if norm == 0 or np.isnan(norm) or np.isinf(norm):
-                    print(f"Normalization error at frame {frame_index}, mags={mags}")
+                    print(f"Normalization error, mags={mags}")
                     return
 
                 # Create visualization
@@ -397,10 +384,10 @@ if _path != "":
                 # Add volume indicator
                 self.add(FRect(
                     video.width() - bar_width,
-                    video.height() - volume * video.height(),
+                    video.height() - aud.get_volume() * video.height(),
                     video.width(),
                     video.height()
                 ))
 
             except Exception as e:
-                print(f"Error initializing FAudio for frame {frame_index}: {e}")
+                print(f"Error initializing FAudio: {e}")

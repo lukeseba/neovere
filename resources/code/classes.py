@@ -108,6 +108,8 @@ class Video:
         self.__width = int(self.__video.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.__height = int(self.__video.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+        self.audio = Audio(self.__video_path)
+
     def open(self):
         """Open the video file."""
         self.__video = cv2.VideoCapture(self.__video_path)
@@ -146,7 +148,9 @@ class Video:
         return self.__height
 
     def frame_audio(self, index: int):
-        pass
+        return self.audio.frame_audio(index)
+
+
 
     def apply_filter(self, start: int, end: int):
         # get 4D array of frames
@@ -277,8 +281,6 @@ class Audio:
 
         self._loaded = True
 
-
-
     def frame_audio(self, frame_index):
         """
         Get preloaded audio data for a specific frame.
@@ -292,11 +294,26 @@ class Audio:
         if not self._loaded:
             raise ValueError("Audio data not preloaded. Call `preload_data()` first.")
         if (frame_index < len(self._audio_data)):
-            return self._audio_data[frame_index]
+            return Frame_Audio(self._audio_data[frame_index])
         else:
-            return self._audio_data[len(self._audio_data)-1]
-    
+            return Frame_Audio(self._audio_data[len(self._audio_data)-1])
 
+class Frame_Audio:
+    def __init__(self, audio_data):
+        self._audio_data = audio_data
+        self.__freqs = self._audio_data["frequencies"]
+
+    def get_volume(self):
+        return self._audio_data["volume"]
+
+    def get_frequency(self, freq: int):
+        return self._audio_data["magnitude"][int(freq/(self.__freqs[1]-self.__freqs[0]))]
+
+    def list_frequencies(self):
+        return self.__freqs
+
+    def list_magnitudes(self):
+        return self._audio_data["magnitude"]
 
 class NonlinearRenderer:
     def __init__(self, vid: Video):

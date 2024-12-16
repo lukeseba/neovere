@@ -36,6 +36,8 @@
 #include "PythonHighlighter.h"
 #include "PythonCodeEditor.h"
 
+#include "TabsWidget.h"
+
 QProcess* process = nullptr;
 
 
@@ -79,8 +81,6 @@ QString exportFontResourceToFile(const QString& resourcePath) {
 
     return tempFilePath;  // Return the path to the temporary file
 }
-
-
 
 void listResourceFiles(const QString &path = ":/") {
     QDirIterator it(path, QDirIterator::Subdirectories);
@@ -267,8 +267,6 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
     }
 }
 
-
-
 void importVideo(QString fileName, QString &videoPath, QPlainTextEdit *outputDisplay, MediaFrame *mediaPanel) {
     videoPath = fileName;
     QFile file(fileName);
@@ -278,6 +276,14 @@ void importVideo(QString fileName, QString &videoPath, QPlainTextEdit *outputDis
     mediaPanel->playVideo();
 
     remakeNeoverePy(videoPath);
+}
+
+void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText) {
+    QFile defaultFile(":/resources/code/default_project.py");
+    defaultFile.open(QIODevice::ReadOnly);
+    codePanel->setPlainText(defaultFile.readAll());
+    defaultFile.close();
+    outputText->appendPlainText("New file created");
 }
 
 int main(int argc, char *argv[]) {
@@ -375,6 +381,10 @@ int main(int argc, char *argv[]) {
     leftLayout->addWidget(bottomButtonWidget);
 
     // Create the right panel
+    // create video headers
+    TabsWidget *mediaHeader = new TabsWidget(6);
+
+    // create media panel
     MediaFrame *mediaPanel = new MediaFrame;
     mediaPanel->setFrameStyle(QFrame::Box | QFrame::Raised);
     mediaPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding); // Expands width, fixed height
@@ -413,7 +423,8 @@ int main(int argc, char *argv[]) {
 
     mediaControlsWidget->setLayout(mediaControlsLayout);
 
-    // create right panel
+    // put right panel together
+    rightLayout->addWidget(mediaHeader);
     rightLayout->addWidget(mediaPanel);
     rightLayout->addWidget(mediaControlsWidget);
     rightLayout->addWidget(outputDisplay);
@@ -434,6 +445,8 @@ int main(int argc, char *argv[]) {
     // generote neovere.py file
     remakeNeoverePy(videoPath);
 
+    // open default file
+    createNewFile(codePanel, outputDisplay);
 
     // --------------- CONNECTIONS ---------------------
 
@@ -460,6 +473,11 @@ int main(int argc, char *argv[]) {
             codePanel->setPlainText(programs.at(0));
             importVideo(videos.at(0), videoPath, outputDisplay, mediaPanel);
         }
+    });
+
+    // make the new button open a new default file
+    QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay]() {
+        createNewFile(codePanel, outputDisplay);
     });
 
     // Make save button download file
