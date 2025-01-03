@@ -1,11 +1,13 @@
 #include "TabButton.h"
 
-TabButton::TabButton(const QString &text, bool closeable = true, QWidget *parent)
+TabButton::TabButton(const QString &text, const QString data, bool closeable = true, QWidget *parent)
     : QWidget(parent), mainButton(new QPushButton(text, this)), closeButtonWidget(new QPushButton("x", this))
 {
     layout = new QHBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
+
+    this->data = data;
     this->closeable = closeable;
 
     // Configure the main button
@@ -37,6 +39,10 @@ QString TabButton::text() const
 {
     return mainButton->text();
 }
+QString TabButton::getData() const {
+    return this->data;
+}
+
 
 QPushButton *TabButton::button()
 {

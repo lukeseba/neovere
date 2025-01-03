@@ -1,4 +1,4 @@
-if _path != "":
+if len(_paths) != 0:
     class Filter:
         def __init__(self, field: Field = FOverlay()):
             self.field = field

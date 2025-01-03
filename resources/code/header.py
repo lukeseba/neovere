@@ -4,6 +4,7 @@ import subprocess
 import os
 import sys
 import copy
+import shutil
 from scipy.io import wavfile
 from scipy.fft import fft, fftfreq
 from PIL import Image, ImageDraw, ImageFont
@@ -17,5 +18,5 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_path = "[%$#path#$%]"
+_paths = [%$#path#$%]
 arial = "[%$#arial#$%]"

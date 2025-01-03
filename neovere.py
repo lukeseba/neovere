@@ -4,6 +4,7 @@ import subprocess
 import os
 import sys
 import copy
+import shutil
 from scipy.io import wavfile
 from scipy.fft import fft, fftfreq
 from PIL import Image, ImageDraw, ImageFont
@@ -17,8 +18,8 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_path = ""
-arial = "/tmp/arial-bold.ttf"
+_paths = ["render.mp4", "C:/Users/luke/OneDrive/Desktop/GitHub/neovere/render2.mp4"]
+arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 class Pixel:
     def __init__(self, r: int, g: int, b: int):
         self.r = r
@@ -336,40 +337,125 @@ class Frame_Audio:
     def list_magnitudes(self):
         return self._audio_data["magnitude"]
 
+import cv2
+import subprocess
+import os
+
+
 class NonlinearRenderer:
-    def __init__(self, vid: Video):
-        self.__video = vid
+    def __init__(self, width: int, height: int, fps: int):
+        self.__width = width
+        self.__height = height
+        self.__fps = fps
         self.__frame_indices = []
         self.__unordered_writer = cv2.VideoWriter(
             "unordered_render.mp4",
-            fourcc,
-            self.__video.fps(),
-            (self.__video.width(), self.__video.height())
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            self.__fps,
+            (self.__width, self.__height)
         )
+        self.__max_frame_index = -1  # To track the highest frame index
+        self.__audio = None  # Placeholder for Audio object
 
-    def set_frame(self, frame_index: int, new_frame: Frame):
+    def set_frame(self, frame_index: int, new_frame):
+
+        if new_frame.pixels.shape != (self.__height, self.__width, 3):
+            raise ValueError("Frame dimensions do not match the initialized video resolution. "+
+                             "Frame dimensions are "+str(len(new_frame.pixels[0]))+"x"+str(len(new_frame.pixels))+
+                             " but renderer dimensions are "+str(self.__width)+"x"+str(self.height()))
+
         self.__frame_indices.append(frame_index)
         self.__unordered_writer.write(new_frame.pixels)
+        self.__max_frame_index = max(self.__max_frame_index, frame_index)
+
+    def attach_audio(self, audio: Audio):
+        """
+        Attach an Audio object to the renderer.
+
+        Parameters:
+        - audio (Audio): The Audio object containing audio data to be added.
+        """
+        self.__audio = audio
+
+    def set_resolution(self, width: int, height: int):
+        """
+        Set the resolution of the renderer.
+
+        Parameters:
+        - width (int): The new width of the video.
+        - height (int): The new height of the video.
+        """
+        self.__width = width
+        self.__height = height
+
+        self.__unordered_writer = cv2.VideoWriter(
+            "unordered_render.mp4",
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            self.__fps,
+            (self.__width, self.__height)
+        )
+
+    def set_fps(self, fps: int):
+        """
+        Set the frames per second (fps) of the renderer.
+
+        Parameters:
+        - fps (int): The new fps value.
+        """
+        self.__fps = fps
+
+        self.__unordered_writer = cv2.VideoWriter(
+            "unordered_render.mp4",
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            self.__fps,
+            (self.__width, self.__height)
+        )
+
+    def fps(self):
+        """
+        Get the current fps of the renderer.
+
+        Returns:
+        - int: The current fps value.
+        """
+        return self.__fps
+
+    def width(self):
+        """
+        Get the current width of the renderer.
+
+        Returns:
+        - int: The current width value.
+        """
+        return self.__width
+
+    def height(self):
+        """
+        Get the current height of the renderer.
+
+        Returns:
+        - int: The current height value.
+        """
+        return self.__height
 
     def render(self, preview: bool = False):
         # Release the unordered writer and initialize ordered writer
         self.__unordered_writer.release()
         ordered_writer = cv2.VideoWriter(
-            "render.mp4",
-            fourcc,
-            self.__video.fps(),
-            (self.__video.width(), self.__video.height())
+            "silent_render.mp4",
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            self.__fps,
+            (self.__width, self.__height)
         )
         unordered_render = cv2.VideoCapture("unordered_render.mp4")
 
         # Render frames
-        for frame_index in range(self.__video.frame_duration()):
-            frame1 = self.__video.get_frame(frame_index).pixels
-
+        for frame_index in range(self.__max_frame_index + 1):
             unordered_frame_idx = self.__get_unordered_frame_idx(frame_index)
             if unordered_frame_idx == -1:
-                # Write the original video frame if no replacement frame
-                ordered_writer.write(frame1)
+                # Write a blank frame if no replacement frame is available
+                blank_frame = cv2.UMat(self.__height, self.__width, cv2.CV_8UC3, [0, 0, 0])
+                ordered_writer.write(blank_frame)
             else:
                 unordered_render.set(cv2.CAP_PROP_POS_FRAMES, unordered_frame_idx)
                 ret, frame2 = unordered_render.read()
@@ -384,25 +470,27 @@ class NonlinearRenderer:
         unordered_render.release()
         ordered_writer.release()
 
-        # Attach audio from the original video
-        self.__attach_audio("render.mp4", self.__video._Video__video_path, "final_render.mp4")
-        print("Video compiled with audio as final_render.mp4")
+        # Attach audio if available
+        if self.__audio:
+            self.__attach_audio("silent_render.mp4", self.__audio.video_path, "render.mp4")
+            print("Video compiled with audio as render.mp4")
+        else:
+            shutil.copy("silent_render.mp4", "render.mp4")
+            print("Video compiled without audio as render.mp4")
 
-    def __attach_audio(self, rendered_video: str, original_video: str, output_video: str):
+    def __attach_audio(self, rendered_video: str, audio_video_path: str, output_video: str):
         audio_file = "temp_audio.aac"
 
-        # Extract audio from the original video
+        # Extract audio from the audio's video path
         extract_audio_command = [
             "ffmpeg",
             "-y",  # Overwrite existing files
-            "-i", original_video,  # Input original video
+            "-i", audio_video_path,  # Input original video
             "-vn",  # No video
             "-acodec", "aac",  # Save as AAC format
             audio_file
         ]
-        print("Extract audio command:", " ".join(extract_audio_command))  # Debug log
         subprocess.run(extract_audio_command, check=True)
-
 
         # Combine audio with the rendered video
         combine_audio_command = [
@@ -415,9 +503,7 @@ class NonlinearRenderer:
             "-shortest",  # Stop when the shortest stream ends
             output_video
         ]
-        print("Combine audio command:", " ".join(combine_audio_command))  # Debug log
         subprocess.run(combine_audio_command, check=True)
-
 
         # Clean up temporary audio file
         os.remove(audio_file)
@@ -438,17 +524,27 @@ def read_font_from_qt_resource(resource_path):
         temp_file.write(file.readAll())
 
     return temp_path
-if _path != "":
-    video = Video(_path)
-    renderer = NonlinearRenderer(video)
-    x_coords, y_coords = np.meshgrid(np.arange(video.width()), np.arange(video.height()))
-    frame_indices = np.arange(video.frame_duration())
+videos = {}
+renderer = NonlinearRenderer(640, 480, 24)
 
-    video.audio.preload_data(video.frame_duration())
-if _path != "":
+#replace 'video' with renderer when getting video.height and such
+
+if _paths:  # Ensure _paths is not empty
+    # Create a dictionary to store Video objects with their names as keys
+
+    for path in _paths:
+        if path:  # Ensure the path is not empty
+            # Extract the video name (file name without extension)
+            video_name = os.path.splitext(os.path.basename(path))[0]
+            videos[video_name] = Video(path)
+
+    for video_name in videos:
+        video = videos[video_name]
+        video.audio.preload_data(video.frame_duration())
+if len(_paths) != 0:
     class Field:
         def __init__(self):
-            self._map = np.zeros((video.height(), video.width()), dtype = np.uint8)
+            self._map = np.zeros((renderer.height(), renderer.width()), dtype = np.uint8)
             self.inverted = False
 
         def get(self, x: int, y: int):
@@ -630,14 +726,14 @@ if _path != "":
     class FOverlay(Field):
         def __init__(self, opacity: int = 1.0):
             super().__init__()
-            self._map = np.full((video.height(), video.width()), opacity*255, dtype=np.uint8)
+            self._map = np.full((renderer.height(), renderer.width()), opacity*255, dtype=np.uint8)
 
     class FPerlin(Field):
         def __init__(self, seed: int = 0, scale: int = 100, octaves: int = 4, persistence: int = 0.2, lacunarity: int = 2.0, contrast: int = 0.0, midpoint=0.5):
             super().__init__()
 
             # Parameters
-            self.width, self.height = video.width(), video.height()
+            self.width, self.height = renderer.width(), renderer.height()
             self.scale = scale
             self.octaves = octaves
             self.persistence = persistence
@@ -806,40 +902,40 @@ if _path != "":
                     print(f"Invalid range: start={start}, end={end}")
                     return
 
-                norm = max(mags) / video.height()
+                norm = max(mags) / renderer.height()
                 if norm == 0 or np.isnan(norm) or np.isinf(norm):
                     print(f"Normalization error, mags={mags}")
                     return
 
                 # Create visualization
                 total_bars = end - start
-                bar_width = video.width() / total_bars
+                bar_width = renderer.width() / total_bars
                 points = []
 
                 for i in range(start, end):
                     x = i * bar_width + bar_width / 2
-                    y = video.height() - mags[i] / norm
+                    y = renderer.height() - mags[i] / norm
                     points.extend([x, y])
 
                 points.extend([
-                    video.width() - bar_width, video.height(),
-                    0, video.height()
+                    renderer.width() - bar_width, renderer.height(),
+                    0, renderer.height()
                 ])
 
                 self.add(FPoly(np.array(points, dtype=np.float32)))
 
                 # Add volume indicator
                 self.add(FRect(
-                    video.width() - bar_width,
-                    video.height() - aud.get_volume() * video.height(),
-                    video.width(),
-                    video.height()
+                    renderer.width() - bar_width,
+                    renderer.height() - aud.get_volume() * renderer.height(),
+                    renderer.width(),
+                    renderer.height()
                 ))
 
             except Exception as e:
                 print(f"Error initializing FAudio: {e}")
 
-if _path != "":
+if len(_paths) != 0:
     class Filter:
         def __init__(self, field: Field = FOverlay()):
             self.field = field

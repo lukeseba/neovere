@@ -1,7 +1,7 @@
-if _path != "":
+if len(_paths) != 0:
     class Field:
         def __init__(self):
-            self._map = np.zeros((video.height(), video.width()), dtype = np.uint8)
+            self._map = np.zeros((renderer.height(), renderer.width()), dtype = np.uint8)
             self.inverted = False
 
         def get(self, x: int, y: int):
@@ -183,14 +183,14 @@ if _path != "":
     class FOverlay(Field):
         def __init__(self, opacity: int = 1.0):
             super().__init__()
-            self._map = np.full((video.height(), video.width()), opacity*255, dtype=np.uint8)
+            self._map = np.full((renderer.height(), renderer.width()), opacity*255, dtype=np.uint8)
 
     class FPerlin(Field):
         def __init__(self, seed: int = 0, scale: int = 100, octaves: int = 4, persistence: int = 0.2, lacunarity: int = 2.0, contrast: int = 0.0, midpoint=0.5):
             super().__init__()
 
             # Parameters
-            self.width, self.height = video.width(), video.height()
+            self.width, self.height = renderer.width(), renderer.height()
             self.scale = scale
             self.octaves = octaves
             self.persistence = persistence
@@ -359,34 +359,34 @@ if _path != "":
                     print(f"Invalid range: start={start}, end={end}")
                     return
 
-                norm = max(mags) / video.height()
+                norm = max(mags) / renderer.height()
                 if norm == 0 or np.isnan(norm) or np.isinf(norm):
                     print(f"Normalization error, mags={mags}")
                     return
 
                 # Create visualization
                 total_bars = end - start
-                bar_width = video.width() / total_bars
+                bar_width = renderer.width() / total_bars
                 points = []
 
                 for i in range(start, end):
                     x = i * bar_width + bar_width / 2
-                    y = video.height() - mags[i] / norm
+                    y = renderer.height() - mags[i] / norm
                     points.extend([x, y])
 
                 points.extend([
-                    video.width() - bar_width, video.height(),
-                    0, video.height()
+                    renderer.width() - bar_width, renderer.height(),
+                    0, renderer.height()
                 ])
 
                 self.add(FPoly(np.array(points, dtype=np.float32)))
 
                 # Add volume indicator
                 self.add(FRect(
-                    video.width() - bar_width,
-                    video.height() - aud.get_volume() * video.height(),
-                    video.width(),
-                    video.height()
+                    renderer.width() - bar_width,
+                    renderer.height() - aud.get_volume() * renderer.height(),
+                    renderer.width(),
+                    renderer.height()
                 ))
 
             except Exception as e:

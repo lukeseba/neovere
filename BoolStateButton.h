@@ -15,6 +15,7 @@ public:
                                 std::function<void()> func1,
                                 std::function<void()> func2,
                                 QWidget *parent = nullptr);
+    void setState(bool state);
 
 private slots:
     void toggleState();

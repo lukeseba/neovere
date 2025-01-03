@@ -18,7 +18,7 @@ MediaFrame::MediaFrame(QWidget *parent)
 mediaPlayer(new QMediaPlayer(this)),
 videoWidget(new QVideoWidget(this)) {
 
-    this->paused = false;
+    this->isPaused = false;
 
     // set up layout to hold video widget
     layout = new QVBoxLayout(this);
@@ -48,9 +48,9 @@ videoWidget(new QVideoWidget(this)) {
         }
     });
 
-    // ensure video stays paused if unpaused by anything else
+    // ensure video stays isPaused if unisPaused by anything else
     QObject::connect(&mediaPlayer, &QMediaPlayer::playbackStateChanged, [&](QMediaPlayer::PlaybackState state) {
-        if (state == QMediaPlayer::PlayingState && paused) {
+        if (state == QMediaPlayer::PlayingState && isPaused) {
             mediaPlayer.pause();
         }
     });
@@ -68,14 +68,22 @@ QMediaPlayer* MediaFrame::getPlayer() {
 }
 
 void MediaFrame::setVideo(const QString &filePath) {
-    mediaPlayer.setSource(QUrl::fromLocalFile(filePath));
+    if (filePath.isEmpty()) {
+        mediaPlayer.setSource(QUrl());
+    } else {
+        mediaPlayer.setSource(QUrl::fromLocalFile(filePath));
+        mediaPlayer.setPosition(0);
+        pauseVideo();
+    }
 }
 void MediaFrame::playVideo() {
-    paused = false;
+    isPaused = false;
     mediaPlayer.play();
+    emit pauseStateChanged(false);
 }
 
 void MediaFrame::pauseVideo() {
-    paused = true;
+    isPaused = true;
     mediaPlayer.pause();
+    emit pauseStateChanged(true);
 }

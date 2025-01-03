@@ -1,15 +1,47 @@
 #include "TabsWidget.h"
 
+#include <iostream>
+#include <ostream>
+#include <qstyle.h>
+#include <QTextBlock>
+
 TabsWidget::TabsWidget(QWidget *parent) : QWidget(parent), currentFont(QFont())
 {
     layout = new QGridLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
+    mainWidget = new QWidget(this);
+    mainWidget->setLayout(layout);
+
+    nameLabel = new QLineEdit(mainWidget);
+    nameLabel->setAlignment(Qt::AlignCenter);
+    nameLabel->setReadOnly(true);
+    nameLabel->setStyleSheet("QLineEdit{ "
+                                        "border: 0px;}"
+                                        );
+
+    mainLayout = new QVBoxLayout(this);
+    mainLayout->addWidget(mainWidget);
+    mainLayout->addWidget(nameLabel);
+    mainWidget->setMinimumWidth(1);
+    setLayout(mainLayout);
 }
 
-void TabsWidget::addTab(const QString &tabName, bool closeable = true)
+TabButton * TabsWidget::selectedTab() {
+    return tabs.at(selectedTabIndex);
+}
+
+TabButton * TabsWidget::getTab(int index) {
+    return tabs.at(index);
+}
+
+void TabsWidget::resizeEvent(QResizeEvent *event) {
+    QWidget::resizeEvent(event);
+}
+
+void TabsWidget::addTab(const QString &tabName, const QString data, bool closeable)
 {
-    TabButton *tab = new TabButton(tabName, closeable, this);
+    TabButton *tab = new TabButton(tabName, data, closeable, this);
     tab->button()->setFont(currentFont); // Apply the current font to the tab
     tab->closeButton()->setFont(currentFont);
 
@@ -38,8 +70,15 @@ void TabsWidget::addTab(const QString &tabName, bool closeable = true)
 
 void TabsWidget::removeTab(int index)
 {
+    emit tabRemoved(index);
+
     if (index < 0 || index >= tabs.size()) {
         return;
+    }
+
+    // deselect current tab if selected
+    if (selectedTabIndex == index) {
+        deselectCurrentTab();
     }
 
     // Remove the tab
@@ -48,12 +87,6 @@ void TabsWidget::removeTab(int index)
     tab->deleteLater();
 
     // Update `selectedTabIndex` if necessary
-    if (selectedTabIndex == index) {
-        selectedTabIndex = -1; // No tab selected after removal
-    } else if (selectedTabIndex > index) {
-        selectedTabIndex--; // Adjust the index of the selected tab
-    }
-
     // Reorganize the layout
     updateTabGrid();
 }
@@ -65,6 +98,11 @@ void TabsWidget::setTabsFont(const QFont &font)
         tab->button()->setFont(font); // Update the font for existing tabs
         tab->closeButton()->setFont(font);
     }
+}
+
+void TabsWidget::setLabelFont(const QFont &font)
+{
+    nameLabel->setFont(font);
 }
 
 void TabsWidget::updateTabGrid()
@@ -96,6 +134,9 @@ void TabsWidget::deselectCurrentTab()
         // Deselect the tab
         currentTab->button()->setChecked(false);
         currentTab->closeButton()->setVisible(false); // Hide the "x" button
+
+        nameLabel->setText("");
+        selectedTabIndex = -1;
     }
 }
 
@@ -122,10 +163,15 @@ void TabsWidget::selectTab(int index) {
         newTab->closeButton()->setVisible(true); // Show the "x" button
     }
 
+    nameLabel->setText(tabs.at(selectedTabIndex)->text());
+
     emit tabSelected(index);
 }
 
 void TabsWidget::handleTabCloseClicked(int index)
 {
     removeTab(index); // Remove the tab when its close button is clicked
+    if (selectedTabIndex == index) {
+        deselectCurrentTab();
+    }
 }

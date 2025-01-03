@@ -10,10 +10,11 @@ class TabButton : public QWidget
     Q_OBJECT
 
 public:
-    explicit TabButton(const QString &text, bool closeable, QWidget *parent = nullptr);
+    explicit TabButton(const QString &text, const QString data, bool closeable, QWidget *parent = nullptr);
 
     void setText(const QString &text);
     QString text() const;
+    QString getData() const;
 
     QPushButton *button();       // Access to the main button
     QPushButton *closeButton();  // Access to the close button
@@ -29,6 +30,7 @@ private:
     QPushButton *mainButton;
     QPushButton *closeButtonWidget;
     QHBoxLayout *layout;
+    QString data;
 
     private slots:
         void handleMainButtonClicked();

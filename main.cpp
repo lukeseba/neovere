@@ -125,7 +125,7 @@ bool openProjectFromFile(QStringList* programs, QStringList* videoPaths,  QPlain
     return true;
 }
 
-void saveProjectToFile(QString programs[], QString videoPaths[],  QPlainTextEdit *outputText) {
+void saveProjectToFile(QString programs[], QStringList videoPaths,  QPlainTextEdit *outputText) {
     // Get the file name and location from the user
     QString fileName = QFileDialog::getSaveFileName(
         nullptr, "Save File", "nullnomen.nv", "NEOVERE Files (*.nv);;All Files (*)");
@@ -147,10 +147,10 @@ void saveProjectToFile(QString programs[], QString videoPaths[],  QPlainTextEdit
     out << "NV/vA_0::1\n";
     for (int i = 0; i < progSize; i++) {
         out << "<>\n";
-        if (videoPaths[i].isEmpty()) {
+        if (videoPaths.at(i).isEmpty()) {
             out << "//";
         } else {
-            out << videoPaths[i];
+            out << videoPaths.at(i);
         }
         out << "\n" << programs[i].count("\n") + 1 << "\n";
         out << programs[i];
@@ -180,7 +180,7 @@ QString combinePythonFiles(const QStringList &fileNames) {
     return combinedCode;
 }
 
-void remakeNeoverePy(QString &videoPath) {
+void remakeNeoverePy(QStringList &videoPath) {
     QStringList pythonFiles = {
         "header",
         "classes",
@@ -191,13 +191,21 @@ void remakeNeoverePy(QString &videoPath) {
         "footer"};
     std::ofstream outFile("neovere.py");
     QString fileString = combinePythonFiles(pythonFiles);
-    fileString.replace("[%$#path#$%]", videoPath);
+    // add all file paths
+    QString allPaths = "";
+    for (int i = 0; i < videoPath.length(); i++) {
+        allPaths += "\"" + videoPath.at(i) + "\"";
+        if (i < videoPath.length() - 1) {
+            allPaths += ", ";
+        }
+    }
+    fileString.replace("%$#path#$%", allPaths);
     fileString.replace("[%$#arial#$%]", exportFontResourceToFile(":/resources/fonts/arial-bold.ttf"));
     outFile << fileString.toStdString();
     outFile.close();
 }
 
-void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player, const QString& videoPath) {
+void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * mediaHeader) {
     // Clean up any existing process
     if (process != nullptr) {
         if (process->state() == QProcess::Running) {
@@ -220,7 +228,7 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
     // Set up environment
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     process->setProcessEnvironment(env);
-    QString pythonExecutable = "python3"; // Adjust for Windows if needed
+    QString pythonExecutable = "python"; // Adjust for Windows if needed
 
     // Connect process output signals
     QObject::connect(process, &QProcess::readyReadStandardOutput, [outputDisplay]() {
@@ -259,6 +267,11 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
         outputDisplay->appendPlainText("Process error occurred: " + errorMsg);
     });
 
+    // when process is finished show rendered tab
+    QObject::connect(process, &QProcess::finished, [mediaHeader]() {
+        mediaHeader->selectTab(0);
+    });
+
     // Run the Python code
     process->start(pythonExecutable, QStringList() << "-c" << fullCode);
 
@@ -268,15 +281,39 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, MediaFrame* player
     }
 }
 
-void importVideo(QString fileName, QString &videoPath, QPlainTextEdit *outputDisplay, MediaFrame *mediaPanel) {
-    videoPath = fileName;
-    QFile file(fileName);
-    outputDisplay->appendPlainText("imported '"+fileName+"'");
+void importVideo(QString fileName, QStringList &videoPath, QPlainTextEdit *outputDisplay, TabsWidget *header) {
+    // Extract the base name of the new video (e.g., "render.mp4")
+    QString newBaseName = QFileInfo(fileName).fileName();
 
-    mediaPanel->setVideo(fileName);
-    mediaPanel->playVideo();
+    // Check if any video in videoPath has the same base name
+    bool duplicateFound = false;
+    for (const QString &path : videoPath) {
+        if (QFileInfo(path).fileName() == newBaseName) {
+            duplicateFound = true;
+            break;
+        }
+    }
+
+    // Handle duplicate videos
+    if (duplicateFound) {
+        outputDisplay->appendPlainText("'" + fileName + "' cannot be imported because a video with the same name already exists.");
+        return;
+    }
+
+    // Import the video if no duplicate found
+    videoPath.append(fileName);
+    QFile file(fileName);
+    outputDisplay->appendPlainText("Imported '" + fileName + "'");
+
+    QString tabName = QFileInfo(fileName).baseName();
+    header->addTab(tabName, fileName, true);
 
     remakeNeoverePy(videoPath);
+}
+
+void removeVideo(QString fileName, QStringList &videoPaths) {
+    videoPaths.removeAll(fileName);
+    remakeNeoverePy(videoPaths);
 }
 
 void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText) {
@@ -314,7 +351,8 @@ int main(int argc, char *argv[]) {
     QFont arial = setFont(":/resources/fonts/arial-bold.ttf");
 
     // project data
-    QString videoPath;
+    QStringList videoPath;
+    QString currentVideo = "";
 
     // Main window widget
     QWidget window;
@@ -384,9 +422,11 @@ int main(int argc, char *argv[]) {
     // Create the right panel
     // create video headers
     TabsWidget *mediaHeader = new TabsWidget();
-    mediaHeader->setTabsFont(dotrice);
-    mediaHeader->addTab("Render", false);
-    mediaHeader->selectTab(0);
+    mediaHeader->setTabsFont(sftel_bold);
+    mediaHeader->setLabelFont(dotim5);
+    importVideo("render.mp4", videoPath, codePanel, mediaHeader);
+    mediaHeader->getTab(0)->closeable = false;
+
 
     // create media panel
     MediaFrame *mediaPanel = new MediaFrame;
@@ -407,7 +447,7 @@ int main(int argc, char *argv[]) {
 
     // Pause/play button
     BoolStateButton *pauseButton = new BoolStateButton(
-       "⏸", "⏵",
+       "⏵", "⏸",
        [mediaPanel]() { mediaPanel->playVideo(); },
        [mediaPanel]() { mediaPanel->pauseVideo(); }
    );
@@ -455,29 +495,43 @@ int main(int argc, char *argv[]) {
     // --------------- CONNECTIONS ---------------------
 
     // Make run button run python code
-    QObject::connect(runButton, &QPushButton::clicked, [outputDisplay, codePanel, mediaPanel, &videoPath]() {
+    QObject::connect(runButton, &QPushButton::clicked, [mediaHeader, outputDisplay, codePanel]() {
         QString code = codePanel->toPlainText();
-        compileCode(code, outputDisplay, mediaPanel, videoPath);
+        compileCode(code, outputDisplay, mediaHeader);
     });
 
     // Make the import button import a media file
-    QObject::connect(uploadButton, &QPushButton::clicked, [&window, &videoPath, outputDisplay, mediaPanel]() {
+    QObject::connect(uploadButton, &QPushButton::clicked, [&window, &videoPath, outputDisplay, mediaPanel, mediaHeader]() {
         QString fileName = QFileDialog::getOpenFileName(&window, "Open File", "", "Video Files (*.mp4);;All Files (*)");
         if (!fileName.isEmpty()) {
-            importVideo(fileName, videoPath, outputDisplay, mediaPanel);
+            importVideo(fileName, videoPath, outputDisplay, mediaHeader);
         }
     });
 
     // Make the open button open a nv file
-    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &videoPath, mediaPanel]() {
+    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &videoPath, mediaPanel, mediaHeader]() {
         QStringList programs;
         QStringList videos;
 
         if(openProjectFromFile(&programs, &videos, outputDisplay)) {
             codePanel->setPlainText(programs.at(0));
-            importVideo(videos.at(0), videoPath, outputDisplay, mediaPanel);
+            importVideo(videos.at(0), videoPath, outputDisplay, mediaHeader);
         }
     });
+
+    QObject::connect(mediaHeader, &TabsWidget::tabRemoved, [mediaHeader, &videoPath, mediaPanel, videoSlider](int index) {
+        removeVideo(mediaHeader->getTab(index)->getData(), videoPath);
+        mediaPanel->setVideo("");
+        videoSlider->updateTimeStamp(0,0);
+    });
+
+    QObject::connect(mediaHeader, &TabsWidget::tabSelected, [mediaHeader, &currentVideo, mediaPanel, videoSlider, pauseButton](int index) {
+        currentVideo = mediaHeader->getTab(index)->getData();
+        mediaPanel->setVideo(currentVideo);
+        videoSlider->setSliderPosition(1);
+        pauseButton->setState(true);
+    });
+
 
     // make the new button open a new default file
     QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay]() {
@@ -496,9 +550,8 @@ int main(int argc, char *argv[]) {
     // Make save button download file
     QObject::connect(saveButton, &QPushButton::clicked, [codePanel, outputDisplay, &videoPath]() {
         QString programs[] = {codePanel->toPlainText()};
-        QString videos[] = {videoPath};
 
-        saveProjectToFile(programs, videos, outputDisplay);
+        saveProjectToFile(programs, videoPath, outputDisplay);
     });
 
     // ---------- FINAL SETUP ---------------

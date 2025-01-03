@@ -15,13 +15,22 @@ BoolStateButton::BoolStateButton(const QString &text1, const QString &text2,
     connect(this, &QPushButton::clicked, this, &BoolStateButton::toggleState);
 }
 
+void BoolStateButton::setState(bool state) {
+    isState1 = state;
+    if (isState1) {
+        setText(stateText1); // Change button text
+    } else {
+        setText(stateText2); // Change button text
+    }
+}
+
 void BoolStateButton::toggleState() {
     if (isState1) {
         setText(stateText2); // Change button text
-        stateFunc2();        // Execute second function
+        stateFunc1();        // Execute second function
     } else {
         setText(stateText1); // Change button text
-        stateFunc1();        // Execute first function
+        stateFunc2();        // Execute first function
     }
     isState1 = !isState1; // Toggle state
 }

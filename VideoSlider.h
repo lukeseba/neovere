@@ -15,6 +15,9 @@ class VideoSlider: public QSlider {
 public:
     explicit VideoSlider(QMediaPlayer *player, int sliderSize, QWidget *parent = nullptr);
     void assignButton(QPushButton *button);
+    void updateTimeStamp(int position, int duration) const;
+    void updateTimeStamp();
+
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
@@ -23,7 +26,6 @@ protected:
     void leaveEvent (QEvent *event) override;
     void sliderChange(SliderChange change) override;
     void setVidPosition() const;
-    void updateTimeStamp(int position, int duration) const;
 
 
     QMediaPlayer *player;

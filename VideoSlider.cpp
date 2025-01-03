@@ -34,6 +34,10 @@ VideoSlider::VideoSlider(QMediaPlayer *player, int sliderSize, QWidget *parent) 
         }
     });
 
+    QObject::connect(player, &QMediaPlayer::mediaStatusChanged, [=](QMediaPlayer::MediaStatus status) {
+        updateTimeStamp(player->position(), player->duration());
+    });
+
     setMouseTracking(true); // Enable hover detection
 }
 

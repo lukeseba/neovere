@@ -20,12 +20,14 @@ public:
     void playVideo();
     QMediaPlayer* getPlayer();
     void pauseVideo();
+    signals:
+    void pauseStateChanged(bool paused);
 
 private:
     QMediaPlayer mediaPlayer;
     QVideoWidget videoWidget;
     QVBoxLayout *layout;
-    bool paused;
+    bool isPaused;
 };
 
 #endif //MEDIAFRAME_H
