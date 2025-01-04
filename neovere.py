@@ -18,7 +18,7 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4", "C:/Users/luke/OneDrive/Desktop/GitHub/neovere/render2.mp4"]
+_paths = ["render.mp4"]
 arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 class Pixel:
     def __init__(self, r: int, g: int, b: int):
@@ -65,30 +65,32 @@ class Frame:
         if pixels.ndim not in (2, 3):
             raise ValueError("Frame must be a 2D (grayscale) or 3D (color) array.")
 
-        self.pixels = pixels.astype(np.uint8)
+        self._pixels = pixels.astype(np.uint8)
+        self._original_pixels = pixels.astype(np.uint8)
+        self._height, self._width = self._pixels.shape
 
     def __str__(self):
         """String representation for debugging."""
-        return f"Frame with shape {self.pixels.shape}"
+        return f"Frame with shape {self.get_pixels().shape}"
 
     def apply_filter(self, filter):
-        self.pixels = filter.apply(self.pixels.astype(np.uint16)).astype(np.uint8)
+        self._pixels = filter.apply(self.get_pixels().astype(np.uint16)).astype(np.uint8)
 
     def get_pixels(self):
-        return self.pixels.astype(np.uint16)
+        return self._pixels.astype(np.uint16)
 
     def modify(self, func):
         """
         Apply a user-defined function to the frame's pixels.
         :param func: A function that takes x, y, and the current pixel (as a numpy array) and returns a new pixel.
         """
-        height, width, _ = self.pixels.shape
+        height, width, _ = self.get_pixels().shape
 
         # Generate x and y coordinate grids
         x_coords, y_coords = np.meshgrid(np.arange(width), np.arange(height))
 
         # Prepare a flattened view for efficient mapping
-        flat_pixels = self.pixels.reshape(-1, 3)
+        flat_pixels = self.get_pixels().reshape(-1, 3)
         flat_x_coords = x_coords.flatten()
         flat_y_coords = y_coords.flatten()
 
@@ -99,13 +101,29 @@ class Frame:
         ])
 
         # Reshape back to the original frame shape
-        self.pixels = new_flat_pixels.reshape(height, width, 3).astype(np.uint8)
+        self._pixels = new_flat_pixels.reshape(height, width, 3).astype(np.uint8)
 
+    def resize(self, w: int, h: int):
+        cv2.resize(self._original_pixels, (w, h))
+        self._width = w
+        self._height = h
+
+    def set_width(self, w: int):
+        self.resize(w, self.height())
+
+    def set_height(self, h: int):
+        self.resize(self.width(), h)
+
+    def width(self):
+        return self._width
+
+    def height(self):
+        return self._height
 
     def preview(self, wait_for_exit: bool = False, title: str = "Frame Preview"):
         # Show the frame (optional)
         window_name = title
-        cv2.imshow(window_name, self.pixels)
+        cv2.imshow(window_name, self.get_pixels())
         if (wait_for_exit):
             # Keep checking if the window is closed
             while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
@@ -113,6 +131,19 @@ class Frame:
                     break
         else:
             cv2.waitKey(1)
+
+    def crop(self, x1: int, y1: int, x2: int, y2: int):
+        # Ensure the coordinates are within bounds
+        x1 = max(0, min(x1, self._width - 1))
+        y1 = max(0, min(y1, self._height - 1))
+        x2 = max(0, min(x2, self._width - 1))
+        y2 = max(0, min(y2, self._height - 1))
+
+        # Crop the pixels
+        self._pixels = self._pixels[y1:y2, x1:x2]
+
+        # Update width and height
+        self._height, self._width = self._pixels.shape[:2]
 
 
 class Video:
@@ -257,7 +288,7 @@ class Audio:
         - frame_duration (int): Total number of frames in the video.
         - reload (bool): Force reloading and recalculation of audio data.
         """
-        cache_file = f"{self.video_path}.npy"
+        cache_file = f"AudioCache/{self._encode_cache_name(self.video_path)}.npy"
 
         if os.path.isfile(cache_file) and not reload:
             # Load preprocessed data from cache
@@ -302,6 +333,39 @@ class Audio:
             np.save(cache_file, self._audio_data)
 
         self._loaded = True
+
+    def _encode_cache_name(self, path: str) -> str:
+        """
+        Encodes a file path into an alphanumeric string.
+        Non-alphanumeric characters are replaced with _ASCII_CODE_ format.
+        """
+        encoded = ""
+        for char in path:
+            if char.isalnum():
+                encoded += char
+            else:
+                encoded += f"_{ord(char)}_"
+        return encoded
+
+    def _decode_cache_name(self, encoded: str) -> str:
+        """
+        Decodes an encoded string back into the original file path.
+        """
+        decoded = ""
+        i = 0
+        while i < len(encoded):
+            if encoded[i] == "_":
+                end = encoded.find("_", i + 1)
+                if end != -1:
+                    ascii_code = int(encoded[i + 1:end])
+                    decoded += chr(ascii_code)
+                    i = end + 1
+                else:
+                    break
+            else:
+                decoded += encoded[i]
+                i += 1
+        return decoded
 
     def frame_audio(self, frame_index):
         """
@@ -359,13 +423,13 @@ class NonlinearRenderer:
 
     def set_frame(self, frame_index: int, new_frame):
 
-        if new_frame.pixels.shape != (self.__height, self.__width, 3):
+        if new_frame.get_pixels().shape != (self.__height, self.__width, 3):
             raise ValueError("Frame dimensions do not match the initialized video resolution. "+
-                             "Frame dimensions are "+str(len(new_frame.pixels[0]))+"x"+str(len(new_frame.pixels))+
+                             "Frame dimensions are "+str(len(new_frame.get_pixels()[0]))+"x"+str(len(new_frame.get_pixels()))+
                              " but renderer dimensions are "+str(self.__width)+"x"+str(self.height()))
 
         self.__frame_indices.append(frame_index)
-        self.__unordered_writer.write(new_frame.pixels)
+        self.__unordered_writer.write(new_frame.get_pixels())
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
 
     def attach_audio(self, audio: Audio):

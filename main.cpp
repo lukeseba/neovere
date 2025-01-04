@@ -109,14 +109,16 @@ bool openProjectFromFile(QStringList* programs, QStringList* videoPaths,  QPlain
         file.close();
         for (int i = 1; i < lines.size(); i++) {
             if (lines.at(i)     == "<>") {
-                const int limit = i+3+lines.at(i+2).toInt();
-                videoPaths->append(lines.at(i+1));
+                const int limit = i+2+lines.at(i+1).toInt();
                 QString program = "";
-                for (int j = i+3; j < limit; j++) {
+                for (int j = i+2; j < limit; j++) {
                     program += lines.at(j) + (j < limit-1 ? "\n":"");
                 }
                 programs->append(program);
                 i=limit;
+            } else if (lines.at(i) == "|>") {
+                videoPaths->append(lines.at(i+1));
+                i++;
             }
         }
     } else {
@@ -147,13 +149,12 @@ void saveProjectToFile(QString programs[], QStringList videoPaths,  QPlainTextEd
     out << "NV/vA_0::1\n";
     for (int i = 0; i < progSize; i++) {
         out << "<>\n";
-        if (videoPaths.at(i).isEmpty()) {
-            out << "//";
-        } else {
-            out << videoPaths.at(i);
-        }
-        out << "\n" << programs[i].count("\n") + 1 << "\n";
-        out << programs[i];
+        out << programs[i].count("\n") + 1 << "\n";
+        out << programs[i] << "\n";
+    }
+    for (int i = 0; i < videoPaths.size(); i++) {
+        out << "|>\n";
+        out << videoPaths.at(i) << "\n";
     }
     file.close();
 
@@ -316,11 +317,20 @@ void removeVideo(QString fileName, QStringList &videoPaths) {
     remakeNeoverePy(videoPaths);
 }
 
-void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText) {
+void removeImportedTabs(TabsWidget *mediaHeader) {
+    for (int i = mediaHeader->tabCount() - 1; i >= 0; i--) {
+        if (mediaHeader->getTab(i)->closeable) {
+            mediaHeader->removeTab(i);
+        }
+    }
+}
+
+void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText, TabsWidget * mediaHeader) {
     QFile defaultFile(":/resources/code/default_project.py");
     defaultFile.open(QIODevice::ReadOnly);
     codePanel->setPlainText(defaultFile.readAll());
     defaultFile.close();
+    removeImportedTabs(mediaHeader);
     outputText->appendPlainText("New file created");
 }
 
@@ -490,7 +500,7 @@ int main(int argc, char *argv[]) {
     remakeNeoverePy(videoPath);
 
     // open default file
-    createNewFile(codePanel, outputDisplay);
+    createNewFile(codePanel, outputDisplay, mediaHeader);
 
     // --------------- CONNECTIONS ---------------------
 
@@ -509,15 +519,21 @@ int main(int argc, char *argv[]) {
     });
 
     // Make the open button open a nv file
-    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &videoPath, mediaPanel, mediaHeader]() {
+    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &videoPath, mediaHeader]() {
         QStringList programs;
         QStringList videos;
 
-        if(openProjectFromFile(&programs, &videos, outputDisplay)) {
-            codePanel->setPlainText(programs.at(0));
-            importVideo(videos.at(0), videoPath, outputDisplay, mediaHeader);
+        if (openProjectFromFile(&programs, &videos, outputDisplay)) {
+            if (!programs.isEmpty()) {
+                codePanel->setPlainText(programs.at(0));
+            }
+            removeImportedTabs(mediaHeader);
+            for (const QString &video : videos) {
+                importVideo(video, videoPath, outputDisplay, mediaHeader);
+            }
         }
     });
+
 
     QObject::connect(mediaHeader, &TabsWidget::tabRemoved, [mediaHeader, &videoPath, mediaPanel, videoSlider](int index) {
         removeVideo(mediaHeader->getTab(index)->getData(), videoPath);
@@ -534,17 +550,17 @@ int main(int argc, char *argv[]) {
 
 
     // make the new button open a new default file
-    QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay]() {
-    QMessageBox confirmationDialog;
-    confirmationDialog.setWindowTitle("Confirm New Program");
-    confirmationDialog.setText("Are you sure you want to create a new program? Unsaved changes will be lost.");
-    confirmationDialog.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
-    confirmationDialog.setDefaultButton(QMessageBox::No);
+    QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay, mediaHeader]() {
+        QMessageBox confirmationDialog;
+        confirmationDialog.setWindowTitle("Confirm New Program");
+        confirmationDialog.setText("Are you sure you want to create a new program? Unsaved changes will be lost.");
+        confirmationDialog.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+        confirmationDialog.setDefaultButton(QMessageBox::No);
 
-    if (confirmationDialog.exec() == QMessageBox::Yes) {
-        createNewFile(codePanel, outputDisplay);
-    }
-});
+        if (confirmationDialog.exec() == QMessageBox::Yes) {
+            createNewFile(codePanel, outputDisplay, mediaHeader);
+        }
+    });
 
 
     // Make save button download file

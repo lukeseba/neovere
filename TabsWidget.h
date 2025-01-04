@@ -19,6 +19,7 @@ public:
     void setLabelFont(const QFont &font);
     void selectTab(int index);
     void resizeEvent(QResizeEvent *event) override;
+    int tabCount();
     TabButton * selectedTab();
     TabButton * getTab(int index);
 

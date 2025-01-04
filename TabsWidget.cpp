@@ -121,6 +121,11 @@ void TabsWidget::updateTabGrid()
     }
 }
 
+int TabsWidget::tabCount() {
+    return tabs.size();
+}
+
+
 void TabsWidget::deselectCurrentTab()
 {
     if (selectedTabIndex >= 0 && selectedTabIndex < tabs.size()) {
