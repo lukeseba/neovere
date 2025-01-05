@@ -45,7 +45,7 @@ class Frame:
 
         self._pixels = pixels.astype(np.uint8)
         self._original_pixels = pixels.astype(np.uint8)
-        self._height, self._width = self._pixels.shape
+        self._height, self._width = self._pixels.shape[:2]
 
     def __str__(self):
         """String representation for debugging."""
@@ -82,7 +82,7 @@ class Frame:
         self._pixels = new_flat_pixels.reshape(height, width, 3).astype(np.uint8)
 
     def resize(self, w: int, h: int):
-        cv2.resize(self._original_pixels, (w, h))
+        self._pixels = cv2.resize(self._original_pixels, (w, h))
         self._width = w
         self._height = h
 
@@ -101,7 +101,7 @@ class Frame:
     def preview(self, wait_for_exit: bool = False, title: str = "Frame Preview"):
         # Show the frame (optional)
         window_name = title
-        cv2.imshow(window_name, self.get_pixels())
+        cv2.imshow(window_name, self._pixels)
         if (wait_for_exit):
             # Keep checking if the window is closed
             while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
@@ -112,10 +112,10 @@ class Frame:
 
     def crop(self, x1: int, y1: int, x2: int, y2: int):
         # Ensure the coordinates are within bounds
-        x1 = max(0, min(x1, self._width - 1))
-        y1 = max(0, min(y1, self._height - 1))
-        x2 = max(0, min(x2, self._width - 1))
-        y2 = max(0, min(y2, self._height - 1))
+        x1 = max(0, min(x1, self._width))
+        y1 = max(0, min(y1, self._height))
+        x2 = max(0, min(x2, self._width))
+        y2 = max(0, min(y2, self._height))
 
         # Crop the pixels
         self._pixels = self._pixels[y1:y2, x1:x2]
@@ -149,7 +149,7 @@ class Video:
         """Release the video file."""
         self.__video.release()
 
-    def get_frame(self, frame_index: int):
+    def get_frame(self, frame_index: int, w = 1.0, h = None):
         """Retrieve a specific frame by index."""
         if frame_index < 0 or frame_index >= self.__frame_duration:
             raise ValueError(f"Frame index {frame_index} is out of bounds (0 to {self._frame_duration - 1}).")
@@ -160,7 +160,11 @@ class Video:
         # Read the frame
         ret, frame = self.__video.read()
         if ret:
-            return Frame(frame)  # Return the raw frame as a NumPy array
+            if h == None and w != 1.0:
+                frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
+            elif h != None:
+                frame = cv2.resize(frame, (w, h))
+            return Frame(frame)
         else:
             raise ValueError(f"Frame {frame_index} could not be read. The video may be closed.")
 
@@ -177,6 +181,18 @@ class Video:
 
     def height(self):
         return self.__height
+
+    def resize(self, w: int, h: int):
+        self._pixels = cv2.resize(self._original_pixels, (w, h))
+        self.__width = w
+        self.__height = h
+
+    def set_width(self, w: int):
+        self.resize(w, self.height())
+
+    def set_height(self, h: int):
+        self.resize(self.width(), h)
+
 
     def frame_audio(self, index: int):
         return self.audio.frame_audio(index)
