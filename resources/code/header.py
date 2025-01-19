@@ -10,6 +10,7 @@ from scipy.fft import fft, fftfreq
 from PIL import Image, ImageDraw, ImageFont
 from PyQt5.QtCore import QFile
 
+
 try:
     import cv2
 except ImportError:

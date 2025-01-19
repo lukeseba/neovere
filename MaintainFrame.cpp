@@ -15,7 +15,7 @@ void MaintainFrame::resizeEvent(QResizeEvent *event) {
 
     // Ensure the height doesn't exceed the available size
     if (newHeight > this->window()->frameGeometry().height()/1.2) {
-        newHeight = this->window()->frameGeometry().height()/1.2;
+        newHeight = this->window()->frameGeometry().height()/1.7;
         newWidth = newHeight * aspectWidth / aspectHeight;
     }
 

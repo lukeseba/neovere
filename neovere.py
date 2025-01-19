@@ -10,6 +10,7 @@ from scipy.fft import fft, fftfreq
 from PIL import Image, ImageDraw, ImageFont
 from PyQt5.QtCore import QFile
 
+
 try:
     import cv2
 except ImportError:
@@ -18,8 +19,8 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4", "C:/Users/luke/Downloads/parkour.mp4"]
-arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
+_paths = ["render.mp4", "/home/lukebalfanz/Downloads/parkour.mp4"]
+arial = "/tmp/arial-bold.ttf"
 class Pixel:
     def __init__(self, r: int, g: int, b: int):
         self.r = r
@@ -76,8 +77,11 @@ class Frame:
     def apply_filter(self, filter):
         self._pixels = filter.apply(self.get_pixels().astype(np.uint16)).astype(np.uint8)
 
-    def get_pixels(self):
-        return self._pixels.astype(np.uint16)
+    def get_pixels(self, standard_size = False):
+        if standard_size:
+            return self._pixels.astype(np.uint8)
+        else:
+            return self._pixels.astype(np.uint16)
 
     def modify(self, func):
         """
@@ -228,15 +232,29 @@ class Video:
         pass
 
 class Audio:
-    def __init__(self, video_path):
+    def __init__(self, file_path):
         """
-        Initialize the Audio object with the path to the video file.
+        Initialize the Audio object with the path to the video, audio, or WAV file.
         """
-        self.video_path = video_path
-        self.fps = self._get_fps()
+        self.file_path = file_path
+        self.file_type = self._determine_file_type()
+        self.fps = self._get_fps() if self.file_type == "mp4" else None
         self.sample_rate = 44100  # Standard audio sample rate
         self._audio_data = None
         self._loaded = False
+
+    def _determine_file_type(self):
+        """
+        Determine the file type based on the extension.
+        """
+        if self.file_path.endswith(".mp4"):
+            return "mp4"
+        elif self.file_path.endswith(".mp3"):
+            return "mp3"
+        elif self.file_path.endswith(".wav"):
+            return "wav"
+        else:
+            raise ValueError("Unsupported file type. Supported types are: mp4, mp3, wav.")
 
     def _get_fps(self):
         """
@@ -247,7 +265,7 @@ class Audio:
             "-select_streams", "v:0",
             "-show_entries", "stream=r_frame_rate",
             "-of", "csv=p=0",
-            self.video_path
+            self.file_path
         ]
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         fps_data = result.stdout.strip()
@@ -256,24 +274,40 @@ class Audio:
 
     def _extract_full_audio(self):
         """
-        Extract the entire audio track from the video using FFmpeg.
+        Extract the entire audio track from the file using FFmpeg.
+        For WAV files, return the path directly.
         """
+        if self.file_type == "wav":
+            return self.file_path
+
         output_audio = "full_audio.wav"
         command = [
             "ffmpeg", "-y",  # Overwrite existing files
-            "-i", self.video_path,  # Input video
-            "-vn",  # Exclude video
+            "-i", self.file_path,  # Input file
+            "-vn" if self.file_type == "mp4" else "",  # Exclude video for MP4 files
+            "-f", "wav",  # Force WAV format for output
             "-ac", "1",  # Mono audio
             "-ar", str(self.sample_rate),  # Set sampling rate
             output_audio
         ]
-        subprocess.run(command, check=True)
+        # Filter out empty strings in the command list
+        command = [arg for arg in command if arg]
+
+        # Run FFmpeg command and capture output
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # Log FFmpeg's output for debugging
+        if result.returncode != 0:
+            print("FFmpeg Error:", result.stderr)
+            raise ValueError("FFmpeg failed to convert the file. Check the input format and file path.")
 
         # Ensure the audio file is created and has data
         if not os.path.isfile(output_audio) or os.path.getsize(output_audio) == 0:
             raise ValueError("Failed to extract audio. The file is empty or not created.")
 
         return output_audio
+
+
 
     def _load_audio_data(self):
         """
@@ -282,8 +316,9 @@ class Audio:
         audio_path = self._extract_full_audio()
         sample_rate, audio_data = wavfile.read(audio_path)
 
-        # Clean up temporary file
-        os.remove(audio_path)
+        # Clean up temporary file if it was created
+        if self.file_type != "wav":
+            os.remove(audio_path)
 
         # Normalize audio if in 16-bit PCM format
         if audio_data.dtype == np.int16:
@@ -291,20 +326,19 @@ class Audio:
 
         # Ensure audio data is not empty
         if len(audio_data) == 0:
-            raise ValueError("Audio data is empty. Check the input video for a valid audio track.")
+            raise ValueError("Audio data is empty. Check the input file for a valid audio track.")
 
         return audio_data
 
-    def preload_data(self, frame_duration: int, reload: bool = False):
+    def preload_data(self, frame_duration: int = None, reload: bool = False):
         """
-        Preload audio data for all frames, mapping audio segments to frames.
-        Results are cached in an .npy file for faster reloading.
+        Preload audio data for all frames or the entire audio duration (if it's an MP3 or WAV).
 
         Parameters:
-        - frame_duration (int): Total number of frames in the video.
+        - frame_duration (int): Total number of frames in the video (ignored for MP3 and WAV files).
         - reload (bool): Force reloading and recalculation of audio data.
         """
-        cache_file = f"AudioCache/{self._encode_cache_name(self.video_path)}.npy"
+        cache_file = f"AudioCache/{self._encode_cache_name(self.file_path)}.npy"
 
         if os.path.isfile(cache_file) and not reload:
             # Load preprocessed data from cache
@@ -312,38 +346,55 @@ class Audio:
         else:
             # Extract and preprocess audio data
             audio_data = self._load_audio_data()
-            samples_per_frame = int(self.sample_rate / self.fps)
-            self._audio_data = []
 
-            for i in range(frame_duration):
-                start_idx = i * samples_per_frame
-                end_idx = start_idx + samples_per_frame
+            if self.fps:
+                # Process audio for MP4
+                samples_per_frame = int(self.sample_rate / self.fps)
+                self._audio_data = []
 
-                # Adjust indices to ensure they stay within bounds
-                if start_idx >= len(audio_data):
-                    break  # Stop if the start index exceeds the audio data length
-                if end_idx > len(audio_data):
-                    end_idx = len(audio_data)  # Clamp end index to the audio length
+                for i in range(frame_duration):
+                    start_idx = i * samples_per_frame
+                    end_idx = start_idx + samples_per_frame
 
-                frame_audio = audio_data[start_idx:end_idx]
+                    # Adjust indices to ensure they stay within bounds
+                    if start_idx >= len(audio_data):
+                        break  # Stop if the start index exceeds the audio data length
+                    if end_idx > len(audio_data):
+                        end_idx = len(audio_data)  # Clamp end index to the audio length
 
-                # Handle cases where frame_audio is empty (e.g., last frame)
-                if len(frame_audio) == 0:
-                    break
+                    frame_audio = audio_data[start_idx:end_idx]
 
-                # Compute volume and frequency spectrum
-                volume = np.sqrt(np.mean(frame_audio ** 2))
-                yf = fft(frame_audio)
-                xf = fftfreq(len(frame_audio), 1 / self.sample_rate)
+                    # Handle cases where frame_audio is empty (e.g., last frame)
+                    if len(frame_audio) == 0:
+                        break
+
+                    # Compute volume and frequency spectrum
+                    volume = np.sqrt(np.mean(frame_audio ** 2))
+                    yf = fft(frame_audio)
+                    xf = fftfreq(len(frame_audio), 1 / self.sample_rate)
+
+                    positive_frequencies = xf[:len(yf) // 2]
+                    magnitude = np.abs(yf[:len(yf) // 2])
+
+                    self._audio_data.append({
+                        "volume": volume,
+                        "frequencies": positive_frequencies,
+                        "magnitude": magnitude
+                    })
+            else:
+                # Process audio for MP3 and WAV
+                volume = np.sqrt(np.mean(audio_data ** 2))
+                yf = fft(audio_data)
+                xf = fftfreq(len(audio_data), 1 / self.sample_rate)
 
                 positive_frequencies = xf[:len(yf) // 2]
                 magnitude = np.abs(yf[:len(yf) // 2])
 
-                self._audio_data.append({
+                self._audio_data = [{
                     "volume": volume,
                     "frequencies": positive_frequencies,
                     "magnitude": magnitude
-                })
+                }]
 
             # Save preprocessed data to cache
             np.save(cache_file, self._audio_data)
@@ -363,42 +414,50 @@ class Audio:
                 encoded += f"_{ord(char)}_"
         return encoded
 
-    def _decode_cache_name(self, encoded: str) -> str:
-        """
-        Decodes an encoded string back into the original file path.
-        """
-        decoded = ""
-        i = 0
-        while i < len(encoded):
-            if encoded[i] == "_":
-                end = encoded.find("_", i + 1)
-                if end != -1:
-                    ascii_code = int(encoded[i + 1:end])
-                    decoded += chr(ascii_code)
-                    i = end + 1
-                else:
-                    break
-            else:
-                decoded += encoded[i]
-                i += 1
-        return decoded
-
     def frame_audio(self, frame_index):
         """
-        Get preloaded audio data for a specific frame.
+        Get preloaded audio data for a specific frame (or the entire audio for MP3 and WAV).
 
         Parameters:
-        - frame_index (int): The index of the frame.
+        - frame_index (int): The index of the frame (ignored for MP3 and WAV).
 
         Returns:
         - dict: A dictionary containing 'volume', 'frequencies', and 'magnitude'.
         """
         if not self._loaded:
             raise ValueError("Audio data not preloaded. Call `preload_data()` first.")
-        if (frame_index < len(self._audio_data)):
-            return Frame_Audio(self._audio_data[frame_index])
+
+        if self.fps:
+            # Handle MP4 frame-specific data
+            if frame_index < len(self._audio_data):
+                return self._audio_data[frame_index]
+            else:
+                return self._audio_data[-1]  # Return last frame data for out-of-bound indices
         else:
-            return Frame_Audio(self._audio_data[len(self._audio_data)-1])
+            # Handle MP3 and WAV single audio data
+            return self._audio_data[0]
+
+    def length(self):
+        """
+        Get the length of the audio file in seconds.
+
+        Returns:
+        - float: The length of the audio file in seconds.
+        """
+        if not self._audio_data:
+            self._load_audio_data()
+
+        audio_path = self._extract_full_audio()
+        sample_rate, audio_data = wavfile.read(audio_path)
+
+        # Calculate the length of the audio
+        audio_length = len(audio_data) / sample_rate
+
+        # Clean up temporary file if it was created
+        if self.file_type != "wav":
+            os.remove(audio_path)
+
+        return audio_length
 
 class Frame_Audio:
     def __init__(self, audio_data):
@@ -439,13 +498,13 @@ class NonlinearRenderer:
 
     def set_frame(self, frame_index: int, new_frame):
 
-        if new_frame.get_pixels().shape != (self.__height, self.__width, 3):
+        if new_frame.get_pixels(True).shape != (self.__height, self.__width, 3):
             raise ValueError("Frame dimensions do not match the initialized video resolution. "+
                              "Frame dimensions are "+str(len(new_frame.get_pixels()[0]))+"x"+str(len(new_frame.get_pixels()))+
                              " but renderer dimensions are "+str(self.__width)+"x"+str(self.height()))
 
         self.__frame_indices.append(frame_index)
-        self.__unordered_writer.write(new_frame.get_pixels())
+        self.__unordered_writer.write(new_frame.get_pixels(True))
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
 
     def attach_audio(self, audio: Audio):
@@ -552,7 +611,7 @@ class NonlinearRenderer:
 
         # Attach audio if available
         if self.__audio:
-            self.__attach_audio("silent_render.mp4", self.__audio.video_path, "render.mp4")
+            self.__attach_audio("silent_render.mp4", self.__audio.file_path, "render.mp4")
             print("Video compiled with audio as render.mp4")
         else:
             shutil.copy("silent_render.mp4", "render.mp4")
