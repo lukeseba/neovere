@@ -185,6 +185,7 @@ if len(_paths) != 0:
             super().__init__()
             self._map = np.full((renderer.height(), renderer.width()), opacity*255, dtype=np.uint8)
 
+    """
     class FPerlin(Field):
         def __init__(self, seed: int = 0, scale: int = 100, octaves: int = 4, persistence: int = 0.2, lacunarity: int = 2.0, contrast: int = 0.0, midpoint=0.5):
             super().__init__()
@@ -217,7 +218,7 @@ if len(_paths) != 0:
             if (self.contrast != 0):
                 self._map = 1 / (1 + np.exp(-self.contrast * (self._map - self.midpoint)))
             self._map *= 255
-
+    """
     class FLine(Field):
         def __init__(self, x1, y1, x2, y2, thickness):
             super().__init__()

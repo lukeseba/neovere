@@ -1,4 +1,3 @@
-from noise import pnoise2
 import numpy as np
 import subprocess
 import os
@@ -9,7 +8,6 @@ from scipy.io import wavfile
 from scipy.fft import fft, fftfreq
 from PIL import Image, ImageDraw, ImageFont
 from PyQt5.QtCore import QFile
-
 
 try:
     import cv2

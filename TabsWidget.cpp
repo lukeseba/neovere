@@ -16,8 +16,7 @@ TabsWidget::TabsWidget(QWidget *parent) : QWidget(parent), currentFont(QFont())
     nameLabel = new QLineEdit(mainWidget);
     nameLabel->setAlignment(Qt::AlignCenter);
     nameLabel->setReadOnly(true);
-    nameLabel->setStyleSheet("QLineEdit{ "
-                                        "border: 0px;}"
+    nameLabel->setStyleSheet("QLineEdit{ background-color: white;  color: black; border: 0px;}"
                                         );
 
     mainLayout = new QVBoxLayout(this);

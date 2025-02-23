@@ -15,6 +15,10 @@ TabButton::TabButton(const QString &text, const QString data, bool closeable = t
     mainButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     layout->addWidget(mainButton);
 
+    QPalette buttonPalette = mainButton->palette();
+    buttonPalette.setColor(QPalette::ButtonText, Qt::black);  // Set text color to black
+    mainButton->setPalette(buttonPalette);
+
 
     // Configure the close button
     closeButtonWidget->setFlat(true); // Optional: make it flat for a minimalist look

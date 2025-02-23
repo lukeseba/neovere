@@ -1,8 +1,12 @@
 if len(_paths) != 0:
     class Filter:
         def __init__(self, field: Field = FOverlay()):
+            self.set_field(field)
+
+        def set_field(self, field: Field):
             self.field = field
             self._map = self.field.get_map()[:, :, np.newaxis]
+            return self
 
         def apply(self, pixels):
             pass
@@ -18,10 +22,24 @@ if len(_paths) != 0:
             self.__r = 255 - self.__r
             self.__g = 255 - self.__g
             self.__b = 255 - self.__b
+            return self
 
         def apply(self, pixels):
             pixels = np.clip((pixels * (1 - self._map) + [self.__b, self.__g, self.__r] * self._map), 0, 255)
             return pixels
+
+    class Invert(Filter):
+        def __init__(self, field: Field = FOverlay()):
+            super().__init__(field)
+
+        def apply(self, pixels):
+            # Invert the pixels
+            inverted_pixels = 255 - pixels
+
+            # Blend based on the map values
+            filtered_pixels = (1 - self._map) * pixels + self._map * inverted_pixels
+
+            return np.clip(filtered_pixels, 0, 255)
 
     class Draw_Frame(Filter):
         def __init__(self, frame: Frame, field: Field = FOverlay()):

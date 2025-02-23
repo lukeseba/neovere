@@ -377,6 +377,7 @@ int main(int argc, char *argv[]) {
     palette.setColor(QPalette::ButtonText, Qt::black);
     palette.setColor(QPalette::Base, Qt::white);
     palette.setColor(QPalette::Text, Qt::black);
+
     window.setPalette(palette);
     window.setAutoFillBackground(true);
 

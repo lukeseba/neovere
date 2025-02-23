@@ -142,7 +142,25 @@ class Video:
         self.__width = int(self.__video.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.__height = int(self.__video.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        self.audio = Audio(self.__video_path)
+        # Check if the video has an audio stream
+        self.audio = None
+        if self._has_audio():
+            print("yuh")
+            self.audio = Audio(self.__video_path)
+
+    def _has_audio(self):
+        """
+        Check if the video file has an audio stream using ffprobe.
+        """
+        check_audio_command = [
+            "ffprobe",
+            "-i", self.__video_path,
+            "-show_streams",
+            "-select_streams", "a",
+            "-loglevel", "error"
+        ]
+        result = subprocess.run(check_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return str(result.stdout) == ''
 
     def open(self):
         """Open the video file."""
@@ -155,7 +173,7 @@ class Video:
     def get_frame(self, frame_index: int, w = 1.0, h = None):
         """Retrieve a specific frame by index."""
         if frame_index < 0 or frame_index >= self.__frame_duration:
-            raise ValueError(f"Frame index {frame_index} is out of bounds (0 to {self._frame_duration - 1}).")
+            raise ValueError(f"Frame index {frame_index} is out of bounds (0 to {self.__frame_duration - 1}).")
 
         # Set the frame position
         self.__video.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
@@ -458,6 +476,12 @@ import subprocess
 import os
 
 
+import cv2
+import subprocess
+import os
+import shutil
+from typing import List
+
 class NonlinearRenderer:
     def __init__(self, width: int, height: int, fps: int):
         self.__width = width
@@ -471,10 +495,9 @@ class NonlinearRenderer:
             (self.__width, self.__height)
         )
         self.__max_frame_index = -1  # To track the highest frame index
-        self.__audio = None  # Placeholder for Audio object
+        self.__audios = []  # List to store multiple audio files
 
     def set_frame(self, frame_index: int, new_frame):
-
         if new_frame.get_pixels(True).shape != (self.__height, self.__width, 3):
             raise ValueError("Frame dimensions do not match the initialized video resolution. "+
                              "Frame dimensions are "+str(len(new_frame.get_pixels()[0]))+"x"+str(len(new_frame.get_pixels()))+
@@ -484,14 +507,17 @@ class NonlinearRenderer:
         self.__unordered_writer.write(new_frame.get_pixels(True))
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
 
-    def attach_audio(self, audio: Audio):
+    def attach_audio(self, audio: 'Audio', volume: float = 1.0):
         """
-        Attach an Audio object to the renderer.
+        Attach an Audio object to the renderer with a specified volume.
 
         Parameters:
         - audio (Audio): The Audio object containing audio data to be added.
+        - volume (float): The volume level (0.0 to 1.0, default = 1.0).
         """
-        self.__audio = audio
+        if not 0.0 <= volume <= 1.0:
+            raise ValueError("Volume must be between 0.0 and 1.0.")
+        self.__audios.append((audio, volume))
 
     def set_resolution(self, width: int, height: int):
         """
@@ -587,42 +613,95 @@ class NonlinearRenderer:
         ordered_writer.release()
 
         # Attach audio if available
-        if self.__audio:
-            self.__attach_audio("silent_render.mp4", self.__audio.file_path, "render.mp4")
+        if self.__audios:
+            self.__attach_audios("silent_render.mp4", self.__audios, "render.mp4")
             print("Video compiled with audio as render.mp4")
         else:
             shutil.copy("silent_render.mp4", "render.mp4")
             print("Video compiled without audio as render.mp4")
 
-    def __attach_audio(self, rendered_video: str, audio_video_path: str, output_video: str):
-        audio_file = "temp_audio.aac"
+        # Release OpenCV resources
+        unordered_render.release()
+        ordered_writer.release()
 
-        # Extract audio from the audio's video path
-        extract_audio_command = [
-            "ffmpeg",
-            "-y",  # Overwrite existing files
-            "-i", audio_video_path,  # Input original video
-            "-vn",  # No video
-            "-acodec", "aac",  # Save as AAC format
-            audio_file
+        # Attach audio if available
+        if self.__audios:
+            self.__attach_audios("silent_render.mp4", self.__audios, "render.mp4")
+            print("Video compiled with audio as render.mp4")
+        else:
+            shutil.copy("silent_render.mp4", "render.mp4")
+            print("Video compiled without audio as render.mp4")
+
+    def __attach_audios(self, rendered_video: str, audios: List[tuple['Audio', float]], output_video: str):
+        # Extract audio from each audio file
+        audio_files = []
+        for i, (audio, volume) in enumerate(audios):
+            audio_file = f"temp_audio_{i}.aac"
+            extract_audio_command = [
+                "ffmpeg",
+                "-y",  # Overwrite existing files
+                "-i", audio.file_path,  # Input audio file
+                "-af", f"volume={volume}",  # Apply volume adjustment
+                "-vn",  # No video
+                "-acodec", "aac",  # Save as AAC format
+                audio_file
+            ]
+            subprocess.run(extract_audio_command, check=True)
+            audio_files.append(audio_file)
+
+        # Check if the rendered video has an audio stream
+        check_audio_command = [
+            "ffprobe",
+            "-i", rendered_video,
+            "-show_streams",
+            "-select_streams", "a",
+            "-loglevel", "error"
         ]
-        subprocess.run(extract_audio_command, check=True)
+        result = subprocess.run(check_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # Create a filter complex string to mix all audio files
+        filter_complex = ""
+        input_args = ["-i", rendered_video]
+        audio_inputs = []
+
+        for i in range(len(audio_files)):
+            input_args.extend(["-i", audio_files[i]])
+            filter_complex += f"[{len(audio_inputs)+1}:a]"
+            audio_inputs.append(f"[{len(audio_inputs)+1}:a]")
+
+        # If no audio streams are found, raise an error
+        if not audio_inputs:
+            raise ValueError("No audio streams found to mix.")
+
+        filter_complex += f"amix=inputs={len(audio_inputs)}:duration=first[a]"
 
         # Combine audio with the rendered video
         combine_audio_command = [
             "ffmpeg",
             "-y",  # Overwrite existing files
-            "-i", rendered_video,  # Input rendered video
-            "-i", audio_file,  # Input extracted audio
+        ]
+        combine_audio_command.extend(input_args)
+        combine_audio_command.extend([
+            "-filter_complex", filter_complex,
+            "-map", "0:v",  # Map video stream from the rendered video
+            "-map", "[a]",  # Map mixed audio stream
             "-c:v", "copy",  # Copy video codec without re-encoding
             "-c:a", "aac",  # Ensure audio is AAC
-            "-shortest",  # Stop when the shortest stream ends
             output_video
-        ]
-        subprocess.run(combine_audio_command, check=True)
+        ])
 
-        # Clean up temporary audio file
-        os.remove(audio_file)
+        try:
+            # Print the FFmpeg command for debugging
+            print("Executing FFmpeg command:", " ".join(combine_audio_command))
+            subprocess.run(combine_audio_command, check=True)
+        except subprocess.CalledProcessError as e:
+            print("FFmpeg Error:", e.stderr)
+            raise ValueError("FFmpeg failed to combine audio tracks. Check the input files and filter graph.")
+        finally:
+            # Clean up temporary audio files
+            for audio_file in audio_files:
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
 
     def __get_unordered_frame_idx(self, target):
         for i, value in enumerate(reversed(self.__frame_indices)):
