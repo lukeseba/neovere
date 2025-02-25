@@ -92,6 +92,7 @@ if len(_paths) != 0:
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=fill_value
             )
+
             return self
 
 
@@ -246,7 +247,7 @@ if len(_paths) != 0:
             super().__init__()
 
             # Convert width and height to axes (semi-width and semi-height)
-            axes = (ellipse_width // 2, ellipse_height // 2)
+            axes = (int(ellipse_width // 2), int(ellipse_height // 2))
 
             # Draw the ellipse directly on the map
             cv2.ellipse(
@@ -320,7 +321,7 @@ if len(_paths) != 0:
         def _draw_with_opencv(self, text, position, font_scale, thickness):
             """Draw the text using OpenCV's putText."""
             # Calculate the text size
-            (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+            (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, int(thickness))
 
             # Calculate the bottom-left corner position for center alignment
             bottom_left_x = int(position[0] - text_width / 2)
@@ -334,7 +335,7 @@ if len(_paths) != 0:
                 cv2.FONT_HERSHEY_SIMPLEX,
                 font_scale,
                 255,  # White text
-                thickness,
+                int(thickness),
                 lineType=cv2.LINE_AA
             )
 

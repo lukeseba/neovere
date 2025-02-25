@@ -28,8 +28,6 @@ class Pixel:
         if isinstance(other, (int, float)):
             return self.__truediv__(Pixel(other, other, other))
 
-
-
 class Frame:
     def __init__(self, pixels: np.ndarray):
         """
@@ -126,6 +124,34 @@ class Frame:
         # Update width and height
         self._height, self._width = self._pixels.shape[:2]
 
+class Color_Frame(Frame):
+    def __init__(self, width: int, height: int, color: tuple = (0, 0, 0)):
+        """
+        Initialize a Color_Frame with a given width, height, and color.
+        :param width: Width of the frame.
+        :param height: Height of the frame.
+        :param color: RGB color tuple (default is black: (0, 0, 0)).
+        """
+        if not (isinstance(color, tuple) and len(color) == 3 and
+                all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
+            raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
+
+        # Create a NumPy array filled with the specified color
+        pixels = np.full((height, width, 3), color, dtype=np.uint8)
+
+        super().__init__(pixels)
+
+    def change_color(self, color: tuple):
+        """
+        Change the entire frame's color.
+        :param color: New RGB color tuple.
+        """
+        if not (isinstance(color, tuple) and len(color) == 3 and
+                all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
+            raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
+
+        self._pixels[:] = color
+
 
 class Video:
     def __init__(self, video_path: str):
@@ -145,7 +171,6 @@ class Video:
         # Check if the video has an audio stream
         self.audio = None
         if self._has_audio():
-            print("yuh")
             self.audio = Audio(self.__video_path)
 
     def _has_audio(self):
@@ -160,7 +185,7 @@ class Video:
             "-loglevel", "error"
         ]
         result = subprocess.run(check_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return str(result.stdout) == ''
+        return str(result.stdout) != ''
 
     def open(self):
         """Open the video file."""
@@ -580,6 +605,14 @@ class NonlinearRenderer:
         """
         return self.__height
 
+    def sec_to_frame(self, seconds):
+        if isinstance(seconds, list) and all(isinstance(item, float) for item in seconds):
+            return [int(value * self.fps()) for value in seconds]
+        elif isinstance(seconds, float) or isinstance(seconds, int):
+            return int(seconds * self.fps())
+        else:
+            raise TypeError("Expected an int, float, or list of floats")
+
     def render(self, preview: bool = False):
         # Release the unordered writer and initialize ordered writer
         self.__unordered_writer.release()
@@ -649,15 +682,15 @@ class NonlinearRenderer:
             subprocess.run(extract_audio_command, check=True)
             audio_files.append(audio_file)
 
-        # Check if the rendered video has an audio stream
-        check_audio_command = [
+        # Get the duration of the video
+        get_video_duration_command = [
             "ffprobe",
             "-i", rendered_video,
-            "-show_streams",
-            "-select_streams", "a",
-            "-loglevel", "error"
+            "-show_entries", "format=duration",
+            "-v", "quiet",
+            "-of", "csv=p=0"
         ]
-        result = subprocess.run(check_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        video_duration = float(subprocess.run(get_video_duration_command, stdout=subprocess.PIPE, text=True).stdout.strip())
 
         # Create a filter complex string to mix all audio files
         filter_complex = ""
@@ -669,11 +702,13 @@ class NonlinearRenderer:
             filter_complex += f"[{len(audio_inputs)+1}:a]"
             audio_inputs.append(f"[{len(audio_inputs)+1}:a]")
 
-        # If no audio streams are found, raise an error
         if not audio_inputs:
             raise ValueError("No audio streams found to mix.")
 
         filter_complex += f"amix=inputs={len(audio_inputs)}:duration=first[a]"
+
+        # Trim or pad audio to match the video duration
+        filter_complex += f"; [a]atrim=duration={video_duration},apad=pad_dur={video_duration}[aout]"
 
         # Combine audio with the rendered video
         combine_audio_command = [
@@ -684,14 +719,13 @@ class NonlinearRenderer:
         combine_audio_command.extend([
             "-filter_complex", filter_complex,
             "-map", "0:v",  # Map video stream from the rendered video
-            "-map", "[a]",  # Map mixed audio stream
+            "-map", "[aout]",  # Map trimmed/mixed audio
             "-c:v", "copy",  # Copy video codec without re-encoding
             "-c:a", "aac",  # Ensure audio is AAC
             output_video
         ])
 
         try:
-            # Print the FFmpeg command for debugging
             print("Executing FFmpeg command:", " ".join(combine_audio_command))
             subprocess.run(combine_audio_command, check=True)
         except subprocess.CalledProcessError as e:
@@ -708,3 +742,125 @@ class NonlinearRenderer:
             if value == target:
                 return len(self.__frame_indices) - 1 - i
         return -1
+
+class Bot:
+    def __init__(self, personality: str = "You are a helpful chatbot.", unique_key: str = None, voice: str = "onyx"):
+        self._personality = personality
+        self._voice = voice
+        if unique_key == None:
+            self._api_key = api_key
+        else:
+            self._api_key = unique_key
+
+        self._client = OpenAI(api_key=self._api_key)
+
+    def set_personality(self, personality: str):
+        self._personality = personality
+
+    def prompt(self, input: str) -> str:
+        response = self._client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": self._personality
+                },
+                {
+                    "role": "user",
+                    "content": input
+                }
+            ]
+        )
+        # Extract the generated caption text
+        return response.choices[0].message.content
+
+        def _count_sounds(self, word: str) -> int:
+            special_combinations = [
+                "ch", "tch", "sh", "oo", "ld", "ss", "qu", "th", "ph", "ng",
+                "gh", "wh", "kn", "wr", "gn", "sc", "sk", "st", "sp", "spl",
+                "spr", "shr", "scr", "str", "dr", "tr", "bl", "cl", "fl", "gl",
+                "pl", "sl", "br", "cr", "fr", "gr", "pr", "tr", "ou", "ght"
+            ]
+        for combo in special_combinations:
+            word = word.replace(combo, "$")
+        return len(word)
+
+    def _calculate_word_timestamps(self, text, total_duration: float, first_timestamp: float):
+        total_sounds = sum(self._count_sounds(re.sub(r"[.,!?]", "", token)) + 2 + (5 if re.search(r"[.,!?]", token) else 0) for token in text)
+        seconds_per_sound = total_duration / total_sounds
+        timestamps = []
+        current_time = first_timestamp
+        for token in text:
+            sounds = self._count_sounds(re.sub(r"[.,!?]", "", token)) + 2 + (5 if re.search(r"[.,!?]", token) else 0)
+            word_duration = sounds * seconds_per_sound
+            timestamps.append((current_time, current_time + word_duration))
+            current_time += word_duration
+        return timestamps
+
+    def _fix_timestamps(self, words, timestamps):
+        i = 0
+        while i < len(timestamps):
+            j = i + 1
+            while j < len(timestamps) and timestamps[j][0] == timestamps[i][0]:
+                j += 1
+            if j > i + 1:
+                start_idx = max(0, i - 1)
+                end_idx = j
+                selected_words = words[start_idx:end_idx]
+                starting_time = timestamps[start_idx][0]
+                total_duration = timestamps[end_idx - 1][1] - starting_time if end_idx < len(timestamps) else 0
+                corrected_timestamps = self._calculate_word_timestamps(selected_words, total_duration, starting_time)
+                timestamps[start_idx:end_idx] = corrected_timestamps
+                i = j
+            else:
+                i += 1
+        return timestamps
+
+    def transcribe(self, audio: Audio):
+        with open(audio.file_path, "rb") as audio_file:
+            transcription = self._client.audio.transcriptions.create(
+                file=audio_file,
+                model="whisper-1",
+                response_format="verbose_json",
+                timestamp_granularities=["word"]
+            )
+        words = [word_obj.word for word_obj in transcription.words]
+        timestamps = [(word_obj.start, word_obj.end) for word_obj in transcription.words]
+        timestamps = self._fix_timestamps(words, timestamps)
+        return words, timestamps
+
+
+    def speak(self, text: str, speed: int = 1) -> Audio:
+        global audio_counter
+        filename = generate_random_filename(seed=audio_counter)
+        audio_counter += 1
+        # MAKE AUDIO
+        audio_path = "AudioCache/"+filename+".wav"
+        speech_file_path = Path(audio_path)
+        response = self._client.audio.speech.create(
+            model="tts-1",
+            voice=self._voice,
+            input=text,
+        )
+        response.stream_to_file(speech_file_path)
+
+        if not speed == 1:
+            # Step 1: Load the original audio
+            y, sr = librosa.load(audio_path, sr=None)
+
+            # Step 2: Adjust the sampling rate for speed-up
+            new_sr = int(sr * speed)  # Increase the sampling rate by 1.5x for speed-up
+
+            # Step 3: Save the resampled audio
+            sf.write(audio_path, y, new_sr)
+
+            # Step 4: Load the resampled audio at the original sampling rate
+            # This ensures playback is correctly synchronized with the video
+            faster_audio, _ = librosa.load(audio_path, sr=sr)
+
+            # Save again to ensure compatibility
+            sf.write(audio_path, faster_audio, sr)
+
+
+        # Load the faster audio into your renderer or video synchronization system
+        return Audio(audio_path)

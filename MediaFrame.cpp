@@ -67,6 +67,14 @@ QMediaPlayer* MediaFrame::getPlayer() {
     return &mediaPlayer;
 }
 
+void MediaFrame::reloadVideo() {
+    const QUrl source = mediaPlayer.source();
+    setVideo("");
+    mediaPlayer.setSource(source);
+    mediaPlayer.setPosition(0);
+    pauseVideo();
+}
+
 void MediaFrame::setVideo(const QString &filePath) {
     if (filePath.isEmpty()) {
         mediaPlayer.setSource(QUrl());

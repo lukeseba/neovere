@@ -17,6 +17,7 @@ public:
     explicit MediaFrame(QWidget *parent = nullptr);
     ~MediaFrame() override;
     void setVideo(const QString &filePath);
+    void reloadVideo();
     void playVideo();
     QMediaPlayer* getPlayer();
     void pauseVideo();

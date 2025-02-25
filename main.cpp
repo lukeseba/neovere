@@ -206,7 +206,7 @@ void remakeNeoverePy(QStringList &videoPath) {
     outFile.close();
 }
 
-void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * mediaHeader) {
+void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * mediaHeader, MediaFrame * mediaPanel) {
     // Clean up any existing process
     if (process != nullptr) {
         if (process->state() == QProcess::Running) {
@@ -269,8 +269,9 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
     });
 
     // when process is finished show rendered tab
-    QObject::connect(process, &QProcess::finished, [mediaHeader]() {
+    QObject::connect(process, &QProcess::finished, [mediaHeader, mediaPanel]() {
         mediaHeader->selectTab(0);
+        mediaPanel->reloadVideo();
     });
 
     // Run the Python code
@@ -506,9 +507,9 @@ int main(int argc, char *argv[]) {
     // --------------- CONNECTIONS ---------------------
 
     // Make run button run python code
-    QObject::connect(runButton, &QPushButton::clicked, [mediaHeader, outputDisplay, codePanel]() {
+    QObject::connect(runButton, &QPushButton::clicked, [mediaHeader, outputDisplay, codePanel, mediaPanel]() {
         QString code = codePanel->toPlainText();
-        compileCode(code, outputDisplay, mediaHeader);
+        compileCode(code, outputDisplay, mediaHeader, mediaPanel);
     });
 
     // Make the import button import a media file
@@ -545,7 +546,6 @@ int main(int argc, char *argv[]) {
     QObject::connect(mediaHeader, &TabsWidget::tabSelected, [mediaHeader, &currentVideo, mediaPanel, videoSlider, pauseButton](int index) {
         currentVideo = mediaHeader->getTab(index)->getData();
         mediaPanel->setVideo(currentVideo);
-        videoSlider->setSliderPosition(1);
         pauseButton->setState(true);
     });
 

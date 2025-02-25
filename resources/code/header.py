@@ -8,6 +8,15 @@ from scipy.io import wavfile
 from scipy.fft import fft, fftfreq
 from PIL import Image, ImageDraw, ImageFont
 from PyQt5.QtCore import QFile
+import librosa
+import soundfile as sf
+from openai import OpenAI
+from pathlib import Path
+import string
+import random
+from typing import List, Tuple
+import re
+
 
 try:
     import cv2
@@ -19,3 +28,7 @@ fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
 _paths = [%$#path#$%]
 arial = "[%$#arial#$%]"
+
+api_key = ""
+
+audio_counter = 0

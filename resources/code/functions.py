@@ -9,3 +9,20 @@ def read_font_from_qt_resource(resource_path):
         temp_file.write(file.readAll())
 
     return temp_path
+
+def generate_random_filename(length: int = 10, seed: int = None) -> str:
+    """
+    Generate a random string that can be safely used as a filename.
+    :param length: Length of the random string (default is 10).
+    :param seed: Seed value for reproducibility (default is None).
+    :return: A randomly generated filename-safe string.
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    characters = string.ascii_letters + string.digits
+    return ''.join(random.choices(characters, k=length))
+
+def set_openai_key(key: str):
+    global api_key
+    api_key = key

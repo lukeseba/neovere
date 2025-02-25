@@ -4,6 +4,9 @@
 //
 
 #include "VideoSlider.h"
+
+#include <iostream>
+#include <ostream>
 #include <QPainter>
 #include <QStyleOptionSlider>
 
