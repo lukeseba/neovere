@@ -705,10 +705,7 @@ class NonlinearRenderer:
         if not audio_inputs:
             raise ValueError("No audio streams found to mix.")
 
-        filter_complex += f"amix=inputs={len(audio_inputs)}:duration=first[a]"
-
-        # Trim or pad audio to match the video duration
-        filter_complex += f"; [a]atrim=duration={video_duration},apad=pad_dur={video_duration}[aout]"
+        filter_complex += f"amix=inputs={len(audio_inputs)}:duration=shortest[aout]"
 
         # Combine audio with the rendered video
         combine_audio_command = [

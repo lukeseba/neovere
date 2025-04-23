@@ -71,46 +71,58 @@ if len(_paths) != 0:
             return self
 
 
-        def move(self, x: int, y: int):
+        def move(self, dx: int, dy: int):
             """
-            Efficiently shift the _map by (x, y) using OpenCV.
-            Pixels shifted outside the bounds are filled with 0s or 1s based on `self.inverted`.
+            Moves the _map by (dx, dy) using an affine transformation.
+            Ensures the transformed image does not exceed OpenCV's limits.
 
-            :param x: Amount to shift in the x-direction (positive is right, negative is left).
-            :param y: Amount to shift in the y-direction (positive is down, negative is up).
+            :param dx: Shift in x direction.
+            :param dy: Shift in y direction.
             """
-            # Determine the fill value based on inversion
-            fill_value = 255 if self.inverted else 0
+            height, width = self._map.shape[:2]
 
-            # Create the transformation matrix for shifting
-            translation_matrix = np.float32([[1, 0, x], [0, 1, y]])
+            # Ensure the resulting image does not exceed OpenCV limits
+            if width >= 32000 or height >= 32000:
+                raise ValueError("Image too large to process in OpenCV warpAffine.")
 
-            # Apply the translation
+            # Define translation matrix
+            translation_matrix = np.float32([[1, 0, dx], [0, 1, dy]])
+
+            # Apply affine transformation
             self._map = cv2.warpAffine(
-                self._map, translation_matrix,
-                (self._map.shape[1], self._map.shape[0]),  # Output size
+                self._map, translation_matrix, (width, height),
                 borderMode=cv2.BORDER_CONSTANT,
-                borderValue=fill_value
+                borderValue=255 if self.inverted else 0
             )
 
             return self
 
-
-        def resize(self, width: int, height: int):
+        def resize(self, width_or_scale, height=None):
             """
-            Resize the _map to the specified width and height using OpenCV.
-            - If the new size is larger, fill new areas with 0s or 1s depending on `self.inverted`.
-            - If the new size is smaller, crop the current map.
+            Resize the _map to the specified width and height or scale it by a factor.
 
-            :param width: New width of the _map.
-            :param height: New height of the _map.
+            - If given a single number (int or float), it scales both width and height by that factor.
+            - If given two numbers, it resizes to those exact dimensions.
+            - If the new size is larger, fills new areas with 0s or 1s depending on `self.inverted`.
+            - If the new size is smaller, crops the current map.
+
+            :param width_or_scale: New width of the _map or a scale factor if height is not provided.
+            :param height: New height of the _map (optional if scaling).
             """
-            # Determine the fill value based on inversion
+            if isinstance(width_or_scale, (int, float)) and height is None:
+                # Treat as a scale factor
+                scale = width_or_scale
+                width = int(self._map.shape[1] * scale)
+                height = int(self._map.shape[0] * scale)
+            else:
+                # Treat as explicit width and height
+                width = int(width_or_scale)
+                height = int(height)
+
             fill_value = 255 if self.inverted else 0
 
-            # If expanding, create a new map filled with the fill value
             if width > self._map.shape[1] or height > self._map.shape[0]:
-                # Create a larger map filled with the fill value
+                # Create a new map filled with the fill value
                 new_map = np.full((height, width), fill_value, dtype=np.uint8)
                 # Determine the overlap region
                 overlap_x_end = min(self._map.shape[1], width)
@@ -121,6 +133,35 @@ if len(_paths) != 0:
             else:
                 # Use OpenCV to resize the map directly if shrinking or reshaping
                 self._map = cv2.resize(self._map, (width, height), interpolation=cv2.INTER_AREA)
+
+            return self
+
+        def scale(self, scale_x: float, scale_y: float = None):
+            """
+            Scale the _map and its contents by a given factor.
+
+            - If only one factor is provided, scales both width and height equally.
+            - If two factors are provided, scales width and height separately.
+            - Resizes the map while preserving content.
+            - If scaling up, fills new areas with 0s or 1s depending on `self.inverted`.
+
+            :param scale_x: Scaling factor for width (or both axes if scale_y is None).
+            :param scale_y: Scaling factor for height (optional, defaults to scale_x).
+            """
+            if not isinstance(scale_x, (int, float)) or scale_x <= 0:
+                raise ValueError("Scale factor must be a positive number.")
+
+            if scale_y is None:
+                scale_y = scale_x  # Use the same factor for both axes if only one is given
+            elif not isinstance(scale_y, (int, float)) or scale_y <= 0:
+                raise ValueError("Scale factor must be a positive number.")
+
+            # Compute new dimensions
+            new_width = int(self._map.shape[1] * scale_x)
+            new_height = int(self._map.shape[0] * scale_y)
+
+            # Resize the map using OpenCV while preserving content
+            self._map = cv2.resize(self._map, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
 
             return self
 
@@ -143,7 +184,7 @@ if len(_paths) != 0:
             roi = self._map[y:y+h, x:x+w]
 
             # Resize the ROI to fit the full canvas size
-            resized_roi = cv2.resize(roi, (self._map.shape[1], self._map.shape[0]), interpolation=cv2.INTER_NEAREST)
+            resized_roi = cv2.resize(roi, (self._map.shape[1], self._map.shape[0]), interpolation=cv2.INTER_LINEAR)
 
             # Fill the map with the resized ROI
             self._map = resized_roi
@@ -156,9 +197,21 @@ if len(_paths) != 0:
 
             return self
 
+        def preview(self, wait_for_exit: bool = False, title: str = "Field Preview"):
+            # Show the frame (optional)
+            window_name = title
+            cv2.imshow(window_name, self._map)
+            if (wait_for_exit):
+                # Keep checking if the window is closed
+                while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
+                    if cv2.waitKey(100) & 0xFF == ord('q'):  # Allow 'q' to close the window as well
+                        break
+            else:
+                cv2.waitKey(1)
+
 
         def get_map(self):
-            return self._map.astype(np.float16) / 255
+            return (self._map.astype(np.float16) / 255)
 
         def set_map(self, map: np.ndarray):
             self._map = map
@@ -180,6 +233,32 @@ if len(_paths) != 0:
             """
             self._map = cv2.flip(self._map, 0)  # Flip around the horizontal axis
             return self
+
+        def crop(self, top_left: tuple, bottom_right: tuple):
+            """
+            Crops the field to a rectangle defined by the given coordinates.
+
+            :param top_left: (x1, y1) - The top-left corner of the cropping area.
+            :param bottom_right: (x2, y2) - The bottom-right corner of the cropping area.
+            """
+            x1, y1 = map(int, top_left)  # Convert to integers
+            x2, y2 = map(int, bottom_right)
+
+            # Ensure coordinates are within bounds
+            x1, x2 = max(0, min(x1, self._map.shape[1])), max(0, min(x2, self._map.shape[1]))
+            y1, y2 = max(0, min(y1, self._map.shape[0])), max(0, min(y2, self._map.shape[0]))
+
+            # Ensure x1, y1 are the top-left and x2, y2 are the bottom-right
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+
+            # Crop the map
+            self._map = self._map[y1:y2, x1:x2]
+
+            return self
+
 
     class FOverlay(Field):
         def __init__(self, opacity: int = 1.0):

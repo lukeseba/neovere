@@ -15,4 +15,7 @@ if _paths:  # Ensure _paths is not empty
     for video_name in videos:
         video = videos[video_name]
         if video.audio != None:
-            video.audio.preload_data(video.frame_duration())
+            try:
+                video.audio.preload_data(video.frame_duration())
+            except:
+                print("Failed to preload audio data for " + video_name)

@@ -7,7 +7,24 @@ if len(_paths) != 0:
 
         def set_field(self, field: Field):
             self.field = field
-            self._map = self.field.get_map()[:, :, np.newaxis]
+            full_map = self.field.get_map()[:, :, np.newaxis]  # Original map
+
+            # Get renderer dimensions
+            render_height = renderer.height()
+            render_width = renderer.width()
+
+            # Get original dimensions
+            orig_height, orig_width = full_map.shape[:2]
+
+            # Calculate cropping boundaries (centered)
+            start_y = max((orig_height - render_height) // 2, 0)
+            start_x = max((orig_width - render_width) // 2, 0)
+            end_y = start_y + min(render_height, orig_height)
+            end_x = start_x + min(render_width, orig_width)
+
+            # Crop the map
+            self._map = full_map[start_y:end_y, start_x:end_x]
+
             return self
 
         def apply(self, pixels):
