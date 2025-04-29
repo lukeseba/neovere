@@ -1,43 +1,76 @@
-class Pixel:
-    def __init__(self, r: int, g: int, b: int):
-        self.r = r
-        self.g = g
-        self.b = b
+from typing import Union
+from typing import Optional
 
-    def __str__(self):
-        return f"({self.r}, {self.g}, {self.b})"
+class FrameAudio:
+    def __init__(self, audio_data: dict) -> None:
+        """Initialize a FrameAudio object with per-frame audio data.
 
-    def __add__(self, other):
-        if isinstance(other, Pixel):
-            return Pixel(max(255, self.r + other.r), max(255, self.g + other.g), max(255, self.b + other.b))
-        if isinstance(other, (int, float)):
-            return self.__add__(Pixel(other, other, other))
-    def __sub__(self, other):
-        if isinstance(other, Pixel):
-            return Pixel(min(0, self.r - other.r), min(0, self.g - other.g), min(0, self.b - other.b))
-        if isinstance(other, (int, float)):
-            return self.__sub__(Pixel(other, other, other))
-    def __mul__(self, other):
-        if isinstance(other, Pixel):
-            return Pixel(max(255, self.r * other.r), max(255, self.g * other.g), max(255, self.b * other.b))
-        if isinstance(other, (int, float)):
-            return self.__mul__(Pixel(other, other, other))
-    def __truediv__(self, other):
-        if isinstance(other, Pixel):
-            return Pixel(min(0, self.r / other.r), min(0, self.g / other.g), min(0, self.b / other.b))
-        if isinstance(other, (int, float)):
-            return self.__truediv__(Pixel(other, other, other))
+        Parameters:
+            audio_data (dict): A dictionary containing audio features for the frame.
+                Expected keys:
+                    - 'volume' (float): Root-mean-square volume of the frame.
+                    - 'frequencies' (np.ndarray): Array of frequency bins.
+                    - 'magnitude' (np.ndarray): Array of magnitudes corresponding to the frequencies.
+        """
+        self._audio_data = audio_data
+        self.__freqs = self._audio_data["frequencies"]
+
+    def get_volume(self) -> float:
+        """Retrieve the root-mean-square volume of the frame.
+
+        Returns:
+            float: The volume level for the frame.
+        """
+        return self._audio_data["volume"]
+
+    def get_frequency(self, freq: int) -> float:
+        """Retrieve the magnitude of a specific frequency within the frame.
+
+        Parameters:
+            freq (int): The frequency (in Hz) to retrieve the magnitude for.
+
+        Returns:
+            float: Magnitude corresponding to the requested frequency.
+
+        Raises:
+            ValueError: If the frequency is outside the valid range of the available data.
+        """
+        bin_width = self.__freqs[1] - self.__freqs[0]
+        index = int(freq / bin_width)
+
+        if index < 0 or index >= len(self.__freqs):
+            raise ValueError(f"Requested frequency {freq} Hz is out of bounds for available frequency range.")
+
+        return self._audio_data["magnitude"][index]
+
+    def list_frequencies(self) -> np.ndarray:
+        """List all frequency bins available in the frame.
+
+        Returns:
+            np.ndarray: Array of frequencies (in Hz).
+        """
+        return self.__freqs
+
+    def list_magnitudes(self) -> np.ndarray:
+        """List all magnitude values corresponding to the frequency bins.
+
+        Returns:
+            np.ndarray: Array of magnitudes.
+        """
+        return self._audio_data["magnitude"]
 
 class Frame:
-    def __init__(self, pixels: np.ndarray):
-        """
-        Initialize the Frame class with a NumPy array representing pixels.
-        :param pixels: A 2D or 3D NumPy array representing the frame.
+    """A class to represent and manipulate a single frame of pixel data."""
+
+    def __init__(self, pixels: np.ndarray) -> None:
+        """Initialize the Frame with a 2D or 3D NumPy array of pixel data.
+
+        Parameters:
+            pixels (np.ndarray): A 2D (grayscale) or 3D (color) NumPy array representing the frame's pixels.
         """
         if not isinstance(pixels, np.ndarray):
             raise ValueError("Frame must be initialized with a NumPy array.")
 
-        # Ensure it's a 2D or 3D array (e.g., grayscale or color image)
         if pixels.ndim not in (2, 3):
             raise ValueError("Frame must be a 2D (grayscale) or 3D (color) array.")
 
@@ -45,92 +78,147 @@ class Frame:
         self._original_pixels = pixels.astype(np.uint8)
         self._height, self._width = self._pixels.shape[:2]
 
-    def __str__(self):
-        """String representation for debugging."""
+    def __str__(self) -> str:
+        """Return a string describing the shape of the frame.
+
+        Returns:
+            str: String representation of the frame.
+        """
         return f"Frame with shape {self.get_pixels().shape}"
 
-    def apply_filter(self, filter):
+    def apply_filter(self, filter) -> None:
+        """Apply a filter object to the frame's pixels.
+
+        Parameters:
+            filter: A filter to apply to the frame
+        """
         self._pixels = filter.apply(self.get_pixels().astype(np.uint16)).astype(np.uint8)
 
-    def get_pixels(self, standard_size = False):
+    def get_pixels(self, standard_size: bool = False) -> np.ndarray:
+        """Return the frame's pixel data as a NumPy array.
+
+        Parameters:
+            standard_size (bool): If True, returns pixels in uint8 format; otherwise, returns uint16.
+
+        Returns:
+            np.ndarray: The pixel data of the frame.
+        """
         if standard_size:
             return self._pixels.astype(np.uint8)
         else:
             return self._pixels.astype(np.uint16)
 
-    def modify(self, func):
-        """
-        Apply a user-defined function to the frame's pixels.
-        :param func: A function that takes x, y, and the current pixel (as a numpy array) and returns a new pixel.
+    def modify(self, func) -> None:
+        """Apply a user-defined function to each pixel in the frame.
+
+        Parameters:
+            func (callable): A function that takes (x, y, pixel) and returns a modified pixel array.
         """
         height, width, _ = self.get_pixels().shape
 
-        # Generate x and y coordinate grids
         x_coords, y_coords = np.meshgrid(np.arange(width), np.arange(height))
-
-        # Prepare a flattened view for efficient mapping
         flat_pixels = self.get_pixels().reshape(-1, 3)
         flat_x_coords = x_coords.flatten()
         flat_y_coords = y_coords.flatten()
 
-        # Apply the function vectorized
         new_flat_pixels = np.array([
             func(x, y, pixel)
             for x, y, pixel in zip(flat_x_coords, flat_y_coords, flat_pixels)
         ])
 
-        # Reshape back to the original frame shape
         self._pixels = new_flat_pixels.reshape(height, width, 3).astype(np.uint8)
 
-    def resize(self, w: int, h: int):
+    def resize(self, w: int, h: int) -> None:
+        """Resize the frame to a new width and height.
+
+        Parameters:
+            w (int): The target width.
+            h (int): The target height.
+        """
         self._pixels = cv2.resize(self._original_pixels, (w, h))
         self._width = w
         self._height = h
 
-    def set_width(self, w: int):
+    def set_width(self, w: int) -> None:
+        """Set a new width for the frame while keeping the current height.
+
+        Parameters:
+            w (int): The new width in pixels.
+        """
         self.resize(w, self.height())
 
-    def set_height(self, h: int):
+    def set_height(self, h: int) -> None:
+        """Set a new height for the frame while keeping the current width.
+
+        Parameters:
+            h (int): The new height in pixels.
+        """
         self.resize(self.width(), h)
 
-    def width(self):
+    def width(self) -> int:
+        """Return the current width of the frame.
+
+        Returns:
+            int: Width in pixels.
+        """
         return self._width
 
-    def height(self):
+    def height(self) -> int:
+        """Return the current height of the frame.
+
+        Returns:
+            int: Height in pixels.
+        """
         return self._height
 
-    def preview(self, wait_for_exit: bool = False, title: str = "Frame Preview"):
-        # Show the frame (optional)
+    def preview(self, wait_for_exit: bool = False, title: str = "Frame Preview") -> None:
+        """Display the frame in a window for previewing.
+
+        Parameters:
+            wait_for_exit (bool): If True, waits until the user closes the window or presses 'q' key.
+            title (str): The window title for the preview.
+        """
         window_name = title
         cv2.imshow(window_name, self._pixels)
-        if (wait_for_exit):
-            # Keep checking if the window is closed
+        if wait_for_exit:
             while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
-                if cv2.waitKey(100) & 0xFF == ord('q'):  # Allow 'q' to close the window as well
+                if cv2.waitKey(100) & 0xFF == ord('q'):
                     break
         else:
             cv2.waitKey(1)
 
-    def crop(self, x1: int, y1: int, x2: int, y2: int):
-        # Ensure the coordinates are within bounds
+    def crop(self, x1: int, y1: int, x2: int, y2: int) -> None:
+        """Crop the frame to a rectangle defined by two corners.
+
+        Parameters:
+            x1 (int): Left (starting) x-coordinate.
+            y1 (int): Top (starting) y-coordinate.
+            x2 (int): Right (ending) x-coordinate.
+            y2 (int): Bottom (ending) y-coordinate.
+        """
         x1 = max(0, min(x1, self._width))
         y1 = max(0, min(y1, self._height))
         x2 = max(0, min(x2, self._width))
         y2 = max(0, min(y2, self._height))
 
-        # Crop the pixels
         self._pixels = self._pixels[y1:y2, x1:x2]
-
-        # Update width and height
         self._height, self._width = self._pixels.shape[:2]
 
+
 class Color_Frame(Frame):
+    """A class to represent and manipulate a frame composed of a single RGB color"""
+
     def __init__(self, width: int, height: int, color: tuple = (0, 0, 0)):
-        """
-        Initialize a Color_Frame with a given width, height, and color.
-        :param width: Width of the frame.
-        :param height: Height of the frame.
-        :param color: RGB color tuple (default is black: (0, 0, 0)).
+        """Initialize a Color_Frame with a specified width, height, and an optional RGB color.
+
+        Parameters:
+            width (int): The width of the frame in pixels.
+            height (int): The height of the frame in pixels.
+            color (tuple, optional): A tuple representing the RGB color to fill the frame.
+                                      Defaults to (0, 0, 0), which is black.
+
+        Raises:
+            ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
         """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
@@ -141,20 +229,37 @@ class Color_Frame(Frame):
 
         super().__init__(pixels)
 
-    def change_color(self, color: tuple):
-        """
-        Change the entire frame's color.
-        :param color: New RGB color tuple.
+    def change_color(self, color: tuple) -> None:
+        """Change the entire frame's color to the specified RGB value.
+
+        Parameters:
+            color (tuple): A tuple representing the new RGB color to set the frame to.
+
+        Raises:
+            ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
         """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
             raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
 
+        # Update all pixel values in the frame to the new color
         self._pixels[:] = color
 
 
+
 class Video:
-    def __init__(self, video_path: str):
+    """A class to represent and manipulate a video file, including reading frames and extracting audio."""
+
+    def __init__(self, video_path: str) -> None:
+        """Initialize the Video object by opening the video file, extracting basic properties,
+        and checking if it contains audio.
+
+        Parameters:
+            video_path (str): Path to the video file to be loaded.
+
+        Raises:
+            SystemExit: If the video file cannot be opened, exits the program.
+        """
         self.__video_path = video_path
         self.open()
 
@@ -174,8 +279,10 @@ class Video:
             self.audio = Audio(self.__video_path)
 
     def _has_audio(self):
-        """
-        Check if the video file has an audio stream using ffprobe.
+        """Check if the video file has an audio stream using ffprobe.
+
+        Returns:
+            bool: True if the video contains audio, False otherwise.
         """
         check_audio_command = [
             "ffprobe",
@@ -187,16 +294,32 @@ class Video:
         result = subprocess.run(check_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return str(result.stdout) != ''
 
-    def open(self):
-        """Open the video file."""
+    def open(self) -> None:
+        """Open the video file using OpenCV's VideoCapture.
+
+        This method is called during initialization to ensure the video is ready to be processed.
+        """
         self.__video = cv2.VideoCapture(self.__video_path)
 
-    def close(self):
-        """Release the video file."""
+    def close(self) -> None:
+        """Release the video file and free any associated resources.
+        """
         self.__video.release()
 
-    def get_frame(self, frame_index: int, w = 1.0, h = None):
-        """Retrieve a specific frame by index."""
+    def get_frame(self, frame_index: int, w=1.0, h=None) -> Frame:
+        """Retrieve a specific frame by its index and optionally resize it.
+
+        Parameters:
+            frame_index (int): The index of the frame to retrieve.
+            w (float, optional): A scaling factor for the width. Defaults to 1.0 (no scaling).
+            h (int, optional): The target height for resizing. If None, the height is scaled proportionally.
+
+        Returns:
+            Frame: A Frame object containing the requested video frame.
+
+        Raises:
+            ValueError: If the frame index is out of bounds or if the frame cannot be read.
+        """
         if frame_index < 0 or frame_index >= self.__frame_duration:
             raise ValueError(f"Frame index {frame_index} is out of bounds (0 to {self.__frame_duration - 1}).")
 
@@ -206,225 +329,225 @@ class Video:
         # Read the frame
         ret, frame = self.__video.read()
         if ret:
-            if h == None and w != 1.0:
+            if h is None and w != 1.0:
                 frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
-            elif h != None:
+            elif h is not None:
                 frame = cv2.resize(frame, (w, h))
             return Frame(frame)
         else:
             raise ValueError(f"Frame {frame_index} could not be read. The video may be closed.")
 
-    def frame_duration(self):
-        """Get the total number of frames."""
+    def frame_duration(self) -> int:
+        """Get the total number of frames in the video.
+
+        Returns:
+            int: The total frame count.
+        """
         return self.__frame_duration
 
-    def fps(self):
-        """Get the frames per second (FPS) of the video."""
+    def fps(self) -> int:
+        """Get the frames per second (FPS) of the video.
+
+        Returns:
+            float: The FPS value of the video.
+        """
         return self.__fps
 
-    def width(self):
+    def width(self) -> int:
+        """Get the width of the video.
+
+        Returns:
+            int: The width of the video in pixels.
+        """
         return self.__width
 
-    def height(self):
+    def height(self) -> int:
+        """Get the height of the video.
+
+        Returns:
+            int: The height of the video in pixels.
+        """
         return self.__height
 
-    def resize(self, w: int, h: int):
+    def resize(self, w: int, h: int) -> None:
+        """Resize the video to the specified width and height.
+
+        Parameters:
+            w (int): The target width in pixels.
+            h (int): The target height in pixels.
+        """
         self._pixels = cv2.resize(self._original_pixels, (w, h))
         self.__width = w
         self.__height = h
 
-    def set_width(self, w: int):
+    def set_width(self, w: int) -> None:
+        """Set a new width for the video while keeping the current height.
+
+        Parameters:
+            w (int): The new width in pixels.
+        """
         self.resize(w, self.height())
 
-    def set_height(self, h: int):
+    def set_height(self, h: int) -> None:
+        """Set a new height for the video while keeping the current width.
+
+        Parameters:
+            h (int): The new height in pixels.
+        """
         self.resize(self.width(), h)
 
+    def frame_audio(self, index: int) -> FrameAudio:
+        """Get the audio frame corresponding to the given video frame index.
 
-    def frame_audio(self, index: int):
+        Parameters:
+            index (int): The index of the video frame.
+
+        Returns:
+            FrameAudio: The corresponding audio frame for the specified video frame.
+        """
         return self.audio.frame_audio(index)
 
 
-
-    def apply_filter(self, start: int, end: int):
-        # get 4D array of frames
-        # get 4D array of filters
-
-        pass
-
 class Audio:
-    def __init__(self, file_path):
+    def __init__(self, file_path: str) -> None:
+        """Initialize an Audio object with a given file path.
+
+        Parameters:
+            file_path (str): Path to the MP4, MP3, or WAV file.
+
+        Raises:
+            ValueError: If the provided file extension is unsupported.
         """
-        Initialize the Audio object with the path to the video, audio, or WAV file.
-        """
-        self.file_path = file_path
-        self.file_type = self._determine_file_type()
-        self.fps = self._get_fps() if self.file_type == "mp4" else None
-        self.sample_rate = 44100  # Standard audio sample rate
+        self._file_path = file_path
+        self._file_type = self._determine_file_type()
+        self._fps = self._get_fps() if self._file_type == "mp4" else 60
+        self._sample_rate = 44100
         self._audio_data = None
         self._loaded = False
+        self._duration = None
 
-    def _determine_file_type(self):
+    def _determine_file_type(self) -> str:
+        """Determine the file type based on the file extension.
+
+        Returns:
+            str: 'mp4', 'mp3', or 'wav'.
+
+        Raises:
+            ValueError: If the file type is not one of the supported formats.
         """
-        Determine the file type based on the extension.
-        """
-        if self.file_path.endswith(".mp4"):
+        if self._file_path.endswith(".mp4"):
             return "mp4"
-        elif self.file_path.endswith(".mp3"):
+        elif self._file_path.endswith(".mp3"):
             return "mp3"
-        elif self.file_path.endswith(".wav"):
+        elif self._file_path.endswith(".wav"):
             return "wav"
         else:
             raise ValueError("Unsupported file type. Supported types are: mp4, mp3, wav.")
 
-    def _get_fps(self):
-        """
-        Use FFmpeg to extract the frames per second (FPS) of the video.
+    def _get_fps(self) -> float:
+        """Extract the frames per second (FPS) from a video file using FFmpeg.
+
+        Returns:
+            float: The FPS value extracted from the video.
+
+        Raises:
+            ValueError: If FFmpeg fails to retrieve valid FPS information.
         """
         command = [
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
             "-show_entries", "stream=r_frame_rate",
             "-of", "csv=p=0",
-            self.file_path
+            self._file_path
         ]
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         fps_data = result.stdout.strip()
         num, denom = map(int, fps_data.split('/'))
         return num / denom
 
-    def _extract_full_audio(self):
+    def _extract_full_audio(self) -> str:
+        """Extract the full audio content into a WAV file using FFmpeg.
+
+        Returns:
+            str: The path to the extracted WAV file.
+
+        Raises:
+            ValueError: If FFmpeg fails to extract or produce a valid audio file.
         """
-        Extract the entire audio track from the file using FFmpeg.
-        For WAV files, return the path directly.
-        """
-        if self.file_type == "wav":
-            return self.file_path
+        if self._file_type == "wav":
+            return self._file_path
 
         output_audio = "full_audio.wav"
         command = [
-            "ffmpeg", "-y",  # Overwrite existing files
-            "-i", self.file_path,  # Input file
-            "-vn" if self.file_type == "mp4" else "",  # Exclude video for MP4 files
-            "-f", "wav",  # Force WAV format for output
-            "-ac", "1",  # Mono audio
-            "-ar", str(self.sample_rate),  # Set sampling rate
+            "ffmpeg", "-y",
+            "-i", self._file_path,
+            "-vn" if self._file_type == "mp4" else "",
+            "-f", "wav",
+            "-ac", "1",
+            "-ar", str(self._sample_rate),
             output_audio
         ]
-        # Filter out empty strings in the command list
         command = [arg for arg in command if arg]
-
-        # Run FFmpeg command and capture output
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-        # Log FFmpeg's output for debugging
         if result.returncode != 0:
             print("FFmpeg Error:", result.stderr)
             raise ValueError("FFmpeg failed to convert the file. Check the input format and file path.")
 
-        # Ensure the audio file is created and has data
         if not os.path.isfile(output_audio) or os.path.getsize(output_audio) == 0:
-            raise ValueError("Failed to extract audio. The file is empty or not created.")
+            raise ValueError("Failed to extract audio. The file is empty or was not created.")
 
         return output_audio
 
+    def _load_audio_data(self) -> np.ndarray:
+        """Load and normalize the full audio data into memory.
 
+        Returns:
+            np.ndarray: The loaded and normalized audio waveform.
 
-    def _load_audio_data(self):
-        """
-        Load the full audio data into memory from the extracted audio file.
+        Raises:
+            ValueError: If the audio data is empty or invalid.
         """
         audio_path = self._extract_full_audio()
         sample_rate, audio_data = wavfile.read(audio_path)
 
-        # Clean up temporary file if it was created
-        if self.file_type != "wav":
+        self._sample_rate = sample_rate
+        self._duration = len(audio_data) / sample_rate
+
+        if self._file_type != "wav":
             os.remove(audio_path)
 
-        # Normalize audio if in 16-bit PCM format
         if audio_data.dtype == np.int16:
             audio_data = audio_data / 32768.0
 
-        # Ensure audio data is not empty
         if len(audio_data) == 0:
             raise ValueError("Audio data is empty. Check the input file for a valid audio track.")
 
         return audio_data
 
-    def preload_data(self, frame_duration: int = None, reload: bool = False):
+    def _get_duration(self) -> float:
+        """Calculate the duration of the audio file.
+
+        Returns:
+            float: Duration of the audio in seconds.
         """
-        Preload audio data for all frames or the entire audio duration (if it's an MP3 or WAV).
+        audio_path = self._extract_full_audio()
+        sample_rate, audio_data = wavfile.read(audio_path)
+        duration = len(audio_data) / sample_rate
 
-        Parameters:
-        - frame_duration (int): Total number of frames in the video (ignored for MP3 and WAV files).
-        - reload (bool): Force reloading and recalculation of audio data.
-        """
-        cache_file = f"AudioCache/{self._encode_cache_name(self.file_path)}.npy"
+        if self._file_type != "wav":
+            os.remove(audio_path)
 
-        if os.path.isfile(cache_file) and not reload:
-            # Load preprocessed data from cache
-            self._audio_data = np.load(cache_file, allow_pickle=True)
-        else:
-            # Extract and preprocess audio data
-            audio_data = self._load_audio_data()
-
-            if self.fps:
-                # Process audio for MP4
-                samples_per_frame = int(self.sample_rate / self.fps)
-                self._audio_data = []
-
-                for i in range(frame_duration):
-                    start_idx = i * samples_per_frame
-                    end_idx = start_idx + samples_per_frame
-
-                    # Adjust indices to ensure they stay within bounds
-                    if start_idx >= len(audio_data):
-                        break  # Stop if the start index exceeds the audio data length
-                    if end_idx > len(audio_data):
-                        end_idx = len(audio_data)  # Clamp end index to the audio length
-
-                    frame_audio = audio_data[start_idx:end_idx]
-
-                    # Handle cases where frame_audio is empty (e.g., last frame)
-                    if len(frame_audio) == 0:
-                        break
-
-                    # Compute volume and frequency spectrum
-                    volume = np.sqrt(np.mean(frame_audio ** 2))
-                    yf = fft(frame_audio)
-                    xf = fftfreq(len(frame_audio), 1 / self.sample_rate)
-
-                    positive_frequencies = xf[:len(yf) // 2]
-                    magnitude = np.abs(yf[:len(yf) // 2])
-
-                    self._audio_data.append({
-                        "volume": volume,
-                        "frequencies": positive_frequencies,
-                        "magnitude": magnitude
-                    })
-            else:
-                # Process audio for MP3 and WAV
-                volume = np.sqrt(np.mean(audio_data ** 2))
-                yf = fft(audio_data)
-                xf = fftfreq(len(audio_data), 1 / self.sample_rate)
-
-                positive_frequencies = xf[:len(yf) // 2]
-                magnitude = np.abs(yf[:len(yf) // 2])
-
-                self._audio_data = [{
-                    "volume": volume,
-                    "frequencies": positive_frequencies,
-                    "magnitude": magnitude
-                }]
-
-            # Save preprocessed data to cache
-            np.save(cache_file, self._audio_data)
-
-        self._loaded = True
+        return duration
 
     def _encode_cache_name(self, path: str) -> str:
-        """
-        Encodes a file path into an alphanumeric string.
-        Non-alphanumeric characters are replaced with _ASCII_CODE_ format.
+        """Encode the given file path into a filesystem-safe cache name.
+
+        Parameters:
+            path (str): The original file path.
+
+        Returns:
+            str: The encoded cache name.
         """
         encoded = ""
         for char in path:
@@ -434,67 +557,127 @@ class Audio:
                 encoded += f"_{ord(char)}_"
         return encoded
 
-    def frame_audio(self, frame_index):
-        """
-        Get preloaded audio data for a specific frame (or the entire audio for MP3 and WAV).
+    def preload_data(self, reload: bool = False) -> None:
+        """Preload and process audio into per-frame features (volume, spectrum) for faster access.
 
         Parameters:
-        - frame_index (int): The index of the frame (ignored for MP3 and WAV).
+            reload (bool): Whether to force reloading even if cached data exists.
+        """
+        cache_file = f"AudioCache/{self._encode_cache_name(self._file_path)}.npy"
+
+        if os.path.isfile(cache_file) and not reload:
+            full_audio_data = np.load(cache_file, allow_pickle=True)
+            self._audio_data = full_audio_data[:-1]
+            self._sample_rate = full_audio_data[-1]["sample rate"]
+            self._duration = full_audio_data[-1]["duration"]
+        else:
+            audio_data = self._load_audio_data()
+            samples_per_frame = int(self._sample_rate / self._fps)
+
+            self._audio_data = []
+            frame_duration = self._duration * self._fps
+
+            for i in range(int(frame_duration)):
+                start_idx = i * samples_per_frame
+                end_idx = start_idx + samples_per_frame
+
+                if start_idx >= len(audio_data):
+                    break
+                if end_idx > len(audio_data):
+                    end_idx = len(audio_data)
+
+                frame_audio = audio_data[start_idx:end_idx]
+
+                if len(frame_audio) == 0:
+                    break
+
+                volume = np.sqrt(np.mean(frame_audio ** 2))
+                yf = fft(frame_audio)
+                xf = fftfreq(len(frame_audio), 1 / self._sample_rate)
+
+                positive_frequencies = xf[:len(yf) // 2]
+                magnitude = np.abs(yf[:len(yf) // 2])
+
+                self._audio_data.append({
+                    "volume": volume,
+                    "frequencies": positive_frequencies,
+                    "magnitude": magnitude
+                })
+
+            self._audio_data.append({
+                "duration": self._duration,
+                "sample rate": self._sample_rate
+            })
+
+            np.save(cache_file, self._audio_data)
+
+        self._loaded = True
+
+    def frame_audio(self, frame_index: int) -> FrameAudio:
+        """Retrieve audio data corresponding to a specific frame.
+
+        Parameters:
+            frame_index (int): The frame index to retrieve.
 
         Returns:
-        - dict: A dictionary containing 'volume', 'frequencies', and 'magnitude'.
+            FrameAudio: Audio features (volume, frequencies, magnitude) for the requested frame.
+
+        Raises:
+            ValueError: If preload_data() has not been called before accessing frame data.
         """
         if not self._loaded:
             raise ValueError("Audio data not preloaded. Call `preload_data()` first.")
 
-        if self.fps:
-            # Handle MP4 frame-specific data
+        if self._file_type == "mp4":
             if frame_index < len(self._audio_data):
-                return self._audio_data[frame_index]
+                return FrameAudio(self._audio_data[frame_index])
             else:
-                return self._audio_data[-1]  # Return last frame data for out-of-bound indices
+                return FrameAudio(self._audio_data[-1])
         else:
-            # Handle MP3 and WAV single audio data
-            return self._audio_data[0]
+            return FrameAudio(self._audio_data[frame_index * int(self._fps / renderer.fps())])
 
-    def length(self):
-        """
-        Get the length of the audio file in seconds.
+    def length(self) -> float:
+        """Return the length of the audio in seconds.
 
         Returns:
-        - float: The length of the audio file in seconds.
+            float: Total duration of the audio file.
         """
         if not self._audio_data:
             self._load_audio_data()
 
         audio_path = self._extract_full_audio()
         sample_rate, audio_data = wavfile.read(audio_path)
-
-        # Calculate the length of the audio
         audio_length = len(audio_data) / sample_rate
 
-        # Clean up temporary file if it was created
-        if self.file_type != "wav":
+        if self._file_type != "wav":
             os.remove(audio_path)
 
         return audio_length
 
-class Frame_Audio:
-    def __init__(self, audio_data):
-        self._audio_data = audio_data
-        self.__freqs = self._audio_data["frequencies"]
+    def fps(self) -> float:
+        """Get the frames per second associated with the video or assumed for audio.
 
-    def get_volume(self):
-        return self._audio_data["volume"]
+        Returns:
+            float: Frames per second value.
+        """
+        return self._fps
 
-    def get_frequency(self, freq: int):
-        return self._audio_data["magnitude"][int(freq/(self.__freqs[1]-self.__freqs[0]))]
+    def file_type(self) -> str:
+        """Return the file type for this Audio object.
 
-    def list_frequencies(self):
-        return self.__freqs
+        Returns:
+            str: File type ('mp4', 'mp3', or 'wav').
+        """
+        return self._file_type
 
-    def list_magnitudes(self):
-        return self._audio_data["magnitude"]
+    def file_path(self) -> str:
+        """Return the original file path provided during initialization.
+
+        Returns:
+            str: File path.
+        """
+        return self._file_path
+
 
 import cv2
 import subprocess
@@ -508,53 +691,71 @@ import shutil
 from typing import List
 
 class NonlinearRenderer:
-    def __init__(self, width: int, height: int, fps: int):
+    def __init__(self, width: int, height: int, fps: int) -> None:
+        """Initialize a NonlinearRenderer for rendering video frames non-sequentially.
+
+        Parameters:
+            width (int): Width of the output video in pixels.
+            height (int): Height of the output video in pixels.
+            fps (int): Frames per second for the output video.
+        """
         self.__width = width
         self.__height = height
         self.__fps = fps
-        self.__frame_indices = []
+        self.__frame_indices: List[int] = []
         self.__unordered_writer = cv2.VideoWriter(
             "unordered_render.mp4",
             cv2.VideoWriter_fourcc(*"mp4v"),
             self.__fps,
             (self.__width, self.__height)
         )
-        self.__max_frame_index = -1  # To track the highest frame index
-        self.__audios = []  # List to store multiple audio files
+        self.__max_frame_index = -1
+        self.__audios: List[tuple['Audio', float]] = []
 
-    def set_frame(self, frame_index: int, new_frame):
+    def set_frame(self, frame_index: int, new_frame: 'Frame') -> None:
+        """Set a frame at a specific index for the output video.
+
+        Parameters:
+            frame_index (int): The index at which the frame will be placed.
+            new_frame (Frame): Frame object containing pixel data.
+
+        Raises:
+            ValueError: If the frame dimensions do not match the initialized resolution.
+        """
         if new_frame.get_pixels(True).shape != (self.__height, self.__width, 3):
-            raise ValueError("Frame dimensions do not match the initialized video resolution. "+
-                             "Frame dimensions are "+str(len(new_frame.get_pixels()[0]))+"x"+str(len(new_frame.get_pixels()))+
-                             " but renderer dimensions are "+str(self.__width)+"x"+str(self.height()))
+            raise ValueError(
+                f"Frame dimensions do not match the initialized video resolution. "
+                f"Frame dimensions are {new_frame.get_pixels().shape[1]}x{new_frame.get_pixels().shape[0]}, "
+                f"but renderer dimensions are {self.__width}x{self.__height}."
+            )
 
         self.__frame_indices.append(frame_index)
         self.__unordered_writer.write(new_frame.get_pixels(True))
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
 
-    def attach_audio(self, audio: 'Audio', volume: float = 1.0):
-        """
-        Attach an Audio object to the renderer with a specified volume.
+    def attach_audio(self, audio: 'Audio', volume: float = 1.0) -> None:
+        """Attach an Audio object to the renderer with a specified volume adjustment.
 
         Parameters:
-        - audio (Audio): The Audio object containing audio data to be added.
-        - volume (float): The volume level (0.0 to 1.0, default = 1.0).
+            audio (Audio): The Audio object containing the audio data.
+            volume (float, optional): Volume multiplier between 0.0 and 1.0. Defaults to 1.0.
+
+        Raises:
+            ValueError: If the volume is not between 0.0 and 1.0.
         """
         if not 0.0 <= volume <= 1.0:
             raise ValueError("Volume must be between 0.0 and 1.0.")
         self.__audios.append((audio, volume))
 
-    def set_resolution(self, width: int, height: int):
-        """
-        Set the resolution of the renderer.
+    def set_resolution(self, width: int, height: int) -> None:
+        """Change the resolution of the output video.
 
         Parameters:
-        - width (int): The new width of the video.
-        - height (int): The new height of the video.
+            width (int): New width in pixels.
+            height (int): New height in pixels.
         """
         self.__width = width
         self.__height = height
-
         self.__unordered_writer = cv2.VideoWriter(
             "unordered_render.mp4",
             cv2.VideoWriter_fourcc(*"mp4v"),
@@ -562,15 +763,13 @@ class NonlinearRenderer:
             (self.__width, self.__height)
         )
 
-    def set_fps(self, fps: int):
-        """
-        Set the frames per second (fps) of the renderer.
+    def set_fps(self, fps: int) -> None:
+        """Change the frames per second (fps) of the output video.
 
         Parameters:
-        - fps (int): The new fps value.
+            fps (int): New frames per second value.
         """
         self.__fps = fps
-
         self.__unordered_writer = cv2.VideoWriter(
             "unordered_render.mp4",
             cv2.VideoWriter_fourcc(*"mp4v"),
@@ -578,43 +777,58 @@ class NonlinearRenderer:
             (self.__width, self.__height)
         )
 
-    def fps(self):
-        """
-        Get the current fps of the renderer.
+    def fps(self) -> int:
+        """Get the current frames per second (fps).
 
         Returns:
-        - int: The current fps value.
+            int: Current fps value.
         """
         return self.__fps
 
-    def width(self):
-        """
-        Get the current width of the renderer.
+    def width(self) -> int:
+        """Get the current video width.
 
         Returns:
-        - int: The current width value.
+            int: Current width in pixels.
         """
         return self.__width
 
-    def height(self):
-        """
-        Get the current height of the renderer.
+    def height(self) -> int:
+        """Get the current video height.
 
         Returns:
-        - int: The current height value.
+            int: Current height in pixels.
         """
         return self.__height
 
-    def sec_to_frame(self, seconds):
+    def sec_to_frame(self, seconds: Union[float, int, List[float]]) -> Union[int, List[int]]:
+        """Convert seconds to frame indices based on the fps.
+
+        Parameters:
+            seconds (float | int | List[float]): Time(s) in seconds.
+
+        Returns:
+            int | List[int]: Corresponding frame index or list of frame indices.
+
+        Raises:
+            TypeError: If input type is invalid.
+        """
         if isinstance(seconds, list) and all(isinstance(item, float) for item in seconds):
             return [int(value * self.fps()) for value in seconds]
-        elif isinstance(seconds, float) or isinstance(seconds, int):
+        elif isinstance(seconds, (float, int)):
             return int(seconds * self.fps())
         else:
-            raise TypeError("Expected an int, float, or list of floats")
+            raise TypeError("Expected an int, float, or list of floats.")
 
-    def render(self, preview: bool = False):
-        # Release the unordered writer and initialize ordered writer
+    def render(self, preview: bool = False) -> None:
+        """Render the final ordered video and optionally attach audio tracks.
+
+        Parameters:
+            preview (bool, optional): Whether to preview each frame during rendering. Defaults to False.
+
+        Raises:
+            ValueError: If frames cannot be read during rendering.
+        """
         self.__unordered_writer.release()
         ordered_writer = cv2.VideoWriter(
             "silent_render.mp4",
@@ -624,28 +838,24 @@ class NonlinearRenderer:
         )
         unordered_render = cv2.VideoCapture("unordered_render.mp4")
 
-        # Render frames
         for frame_index in range(self.__max_frame_index + 1):
-            unordered_frame_idx = self.__get_unordered_frame_idx(frame_index)
-            if unordered_frame_idx == -1:
-                # Write a blank frame if no replacement frame is available
+            unordered_idx = self.__get_unordered_frame_idx(frame_index)
+            if unordered_idx == -1:
                 blank_frame = cv2.UMat(self.__height, self.__width, cv2.CV_8UC3, [0, 0, 0])
                 ordered_writer.write(blank_frame)
             else:
-                unordered_render.set(cv2.CAP_PROP_POS_FRAMES, unordered_frame_idx)
-                ret, frame2 = unordered_render.read()
+                unordered_render.set(cv2.CAP_PROP_POS_FRAMES, unordered_idx)
+                ret, frame = unordered_render.read()
                 if ret:
                     if preview:
-                        Frame(frame2).preview()
-                    ordered_writer.write(frame2)
+                        Frame(frame).preview()
+                    ordered_writer.write(frame)
                 else:
-                    raise ValueError(f"Error: Could not read frame {frame_index}.")
+                    raise ValueError(f"Could not read frame {frame_index}.")
 
-        # Release OpenCV resources
         unordered_render.release()
         ordered_writer.release()
 
-        # Attach audio if available
         if self.__audios:
             self.__attach_audios("silent_render.mp4", self.__audios, "render.mp4")
             print("Video compiled with audio as render.mp4")
@@ -653,168 +863,128 @@ class NonlinearRenderer:
             shutil.copy("silent_render.mp4", "render.mp4")
             print("Video compiled without audio as render.mp4")
 
-        # Release OpenCV resources
-        unordered_render.release()
-        ordered_writer.release()
+    def __attach_audios(self, rendered_video: str, audios: List[tuple['Audio', float]], output_video: str) -> None:
+        """Attach multiple audio tracks to the final rendered video using ffmpeg.
 
-        # Attach audio if available
-        if self.__audios:
-            self.__attach_audios("silent_render.mp4", self.__audios, "render.mp4")
-            print("Video compiled with audio as render.mp4")
-        else:
-            shutil.copy("silent_render.mp4", "render.mp4")
-            print("Video compiled without audio as render.mp4")
+        Parameters:
+            rendered_video (str): Path to the silent video file.
+            audios (List[Tuple[Audio, float]]): List of Audio objects with associated volume adjustments.
+            output_video (str): Path to save the final video with audio.
 
-    def __attach_audios(self, rendered_video: str, audios: List[tuple['Audio', float]], output_video: str):
-        # Extract audio from each audio file
+        Raises:
+            ValueError: If FFmpeg fails to combine the audio tracks.
+        """
         audio_files = []
         for i, (audio, volume) in enumerate(audios):
             audio_file = f"temp_audio_{i}.aac"
-            extract_audio_command = [
-                "ffmpeg",
-                "-y",  # Overwrite existing files
-                "-i", audio.file_path,  # Input audio file
-                "-af", f"volume={volume}",  # Apply volume adjustment
-                "-vn",  # No video
-                "-acodec", "aac",  # Save as AAC format
+            extract_command = [
+                "ffmpeg", "-y",
+                "-i", audio.file_path(),
+                "-af", f"volume={volume}",
+                "-vn",
+                "-acodec", "aac",
                 audio_file
             ]
-            subprocess.run(extract_audio_command, check=True)
+            subprocess.run(extract_command, check=True)
             audio_files.append(audio_file)
 
-        # Get the duration of the video
-        get_video_duration_command = [
-            "ffprobe",
-            "-i", rendered_video,
-            "-show_entries", "format=duration",
-            "-v", "quiet",
-            "-of", "csv=p=0"
-        ]
-        video_duration = float(subprocess.run(get_video_duration_command, stdout=subprocess.PIPE, text=True).stdout.strip())
-
-        # Create a filter complex string to mix all audio files
-        filter_complex = ""
         input_args = ["-i", rendered_video]
-        audio_inputs = []
+        filter_complex = ""
+        for i, audio_file in enumerate(audio_files):
+            input_args.extend(["-i", audio_file])
+            filter_complex += f"[{i+1}:a]"
 
-        for i in range(len(audio_files)):
-            input_args.extend(["-i", audio_files[i]])
-            filter_complex += f"[{len(audio_inputs)+1}:a]"
-            audio_inputs.append(f"[{len(audio_inputs)+1}:a]")
-
-        if not audio_inputs:
+        if not audio_files:
             raise ValueError("No audio streams found to mix.")
 
-        filter_complex += f"amix=inputs={len(audio_inputs)}:duration=shortest[aout]"
+        filter_complex += f"amix=inputs={len(audio_files)}:duration=shortest[aout]"
 
-        # Combine audio with the rendered video
-        combine_audio_command = [
-            "ffmpeg",
-            "-y",  # Overwrite existing files
-        ]
-        combine_audio_command.extend(input_args)
-        combine_audio_command.extend([
+        combine_command = [
+            "ffmpeg", "-y", *input_args,
             "-filter_complex", filter_complex,
-            "-map", "0:v",  # Map video stream from the rendered video
-            "-map", "[aout]",  # Map trimmed/mixed audio
-            "-c:v", "copy",  # Copy video codec without re-encoding
-            "-c:a", "aac",  # Ensure audio is AAC
+            "-map", "0:v",
+            "-map", "[aout]",
+            "-c:v", "copy",
+            "-c:a", "aac",
             output_video
-        ])
+        ]
 
         try:
-            print("Executing FFmpeg command:", " ".join(combine_audio_command))
-            subprocess.run(combine_audio_command, check=True)
+            print("Executing FFmpeg command:", " ".join(combine_command))
+            subprocess.run(combine_command, check=True)
         except subprocess.CalledProcessError as e:
-            print("FFmpeg Error:", e.stderr)
-            raise ValueError("FFmpeg failed to combine audio tracks. Check the input files and filter graph.")
+            raise ValueError("FFmpeg failed to combine audio tracks.") from e
         finally:
-            # Clean up temporary audio files
             for audio_file in audio_files:
                 if os.path.exists(audio_file):
                     os.remove(audio_file)
 
-    def __get_unordered_frame_idx(self, target):
+    def __get_unordered_frame_idx(self, target: int) -> int:
+        """Find the corresponding unordered frame index for a given logical frame index.
+
+        Parameters:
+            target (int): Logical frame index.
+
+        Returns:
+            int: Index in the unordered video file or -1 if not found.
+        """
         for i, value in enumerate(reversed(self.__frame_indices)):
             if value == target:
                 return len(self.__frame_indices) - 1 - i
         return -1
 
 class Bot:
-    def __init__(self, personality: str = "You are a helpful chatbot.", unique_key: str = None, voice: str = "onyx"):
+    """Chatbot that can generate text responses, synthesize speech, and transcribe audio."""
+
+    def __init__(self, personality: str = "You are a helpful chatbot.", unique_key: Optional[str] = None, voice: str = "onyx") -> None:
+        """Initialize a Bot instance.
+
+        Parameters:
+            personality (str): The system prompt defining the chatbot's behavior.
+            unique_key (Optional[str]): An optional API key to override the default.
+            voice (str): Voice model name used for text-to-speech synthesis.
+        """
         self._personality = personality
         self._voice = voice
-        if unique_key == None:
-            self._api_key = api_key
-        else:
-            self._api_key = unique_key
-
+        self._api_key = unique_key if unique_key else api_key
         self._client = OpenAI(api_key=self._api_key)
 
-    def set_personality(self, personality: str):
+    def set_personality(self, personality: str) -> None:
+        """Update the chatbot's system prompt.
+
+        Parameters:
+            personality (str): The new system prompt to use.
+        """
         self._personality = personality
 
-    def prompt(self, input: str) -> str:
+    def prompt(self, input_text: str) -> str:
+        """Generate a chatbot response for a given user input.
+
+        Parameters:
+            input_text (str): The user's input message.
+
+        Returns:
+            str: The chatbot's generated response.
+        """
         response = self._client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {
-                    "role": "system",
-                    "content": self._personality
-                },
-                {
-                    "role": "user",
-                    "content": input
-                }
+                {"role": "system", "content": self._personality},
+                {"role": "user", "content": input_text}
             ]
         )
-        # Extract the generated caption text
         return response.choices[0].message.content
 
-        def _count_sounds(self, word: str) -> int:
-            special_combinations = [
-                "ch", "tch", "sh", "oo", "ld", "ss", "qu", "th", "ph", "ng",
-                "gh", "wh", "kn", "wr", "gn", "sc", "sk", "st", "sp", "spl",
-                "spr", "shr", "scr", "str", "dr", "tr", "bl", "cl", "fl", "gl",
-                "pl", "sl", "br", "cr", "fr", "gr", "pr", "tr", "ou", "ght"
-            ]
-        for combo in special_combinations:
-            word = word.replace(combo, "$")
-        return len(word)
+    def transcribe(self, audio: 'Audio') -> Tuple[List[str], List[Tuple[float, float]]]:
+        """Transcribe spoken audio into text with word-level timestamps.
 
-    def _calculate_word_timestamps(self, text, total_duration: float, first_timestamp: float):
-        total_sounds = sum(self._count_sounds(re.sub(r"[.,!?]", "", token)) + 2 + (5 if re.search(r"[.,!?]", token) else 0) for token in text)
-        seconds_per_sound = total_duration / total_sounds
-        timestamps = []
-        current_time = first_timestamp
-        for token in text:
-            sounds = self._count_sounds(re.sub(r"[.,!?]", "", token)) + 2 + (5 if re.search(r"[.,!?]", token) else 0)
-            word_duration = sounds * seconds_per_sound
-            timestamps.append((current_time, current_time + word_duration))
-            current_time += word_duration
-        return timestamps
+        Parameters:
+            audio (Audio): The audio object to transcribe.
 
-    def _fix_timestamps(self, words, timestamps):
-        i = 0
-        while i < len(timestamps):
-            j = i + 1
-            while j < len(timestamps) and timestamps[j][0] == timestamps[i][0]:
-                j += 1
-            if j > i + 1:
-                start_idx = max(0, i - 1)
-                end_idx = j
-                selected_words = words[start_idx:end_idx]
-                starting_time = timestamps[start_idx][0]
-                total_duration = timestamps[end_idx - 1][1] - starting_time if end_idx < len(timestamps) else 0
-                corrected_timestamps = self._calculate_word_timestamps(selected_words, total_duration, starting_time)
-                timestamps[start_idx:end_idx] = corrected_timestamps
-                i = j
-            else:
-                i += 1
-        return timestamps
-
-    def transcribe(self, audio: Audio):
-        with open(audio.file_path, "rb") as audio_file:
+        Returns:
+            Tuple[List[str], List[Tuple[float, float]]]: A list of words and their corresponding (start, end) timestamps.
+        """
+        with open(audio.file_path(), "rb") as audio_file:
             transcription = self._client.audio.transcriptions.create(
                 file=audio_file,
                 model="whisper-1",
@@ -826,14 +996,23 @@ class Bot:
         timestamps = self._fix_timestamps(words, timestamps)
         return words, timestamps
 
+    def speak(self, text: str, speed: float = 1.0) -> 'Audio':
+        """Synthesize speech from text and optionally adjust its playback speed.
 
-    def speak(self, text: str, speed: int = 1) -> Audio:
+        Parameters:
+            text (str): The text to convert into speech.
+            speed (float): A multiplier to adjust the playback speed (default is 1.0).
+
+        Returns:
+            Audio: An Audio object containing the synthesized speech.
+        """
         global audio_counter
         filename = generate_random_filename(seed=audio_counter)
         audio_counter += 1
-        # MAKE AUDIO
-        audio_path = "AudioCache/"+filename+".wav"
+
+        audio_path = f"AudioCache/{filename}.wav"
         speech_file_path = Path(audio_path)
+
         response = self._client.audio.speech.create(
             model="tts-1",
             voice=self._voice,
@@ -841,23 +1020,85 @@ class Bot:
         )
         response.stream_to_file(speech_file_path)
 
-        if not speed == 1:
-            # Step 1: Load the original audio
+        if speed != 1.0:
             y, sr = librosa.load(audio_path, sr=None)
-
-            # Step 2: Adjust the sampling rate for speed-up
-            new_sr = int(sr * speed)  # Increase the sampling rate by 1.5x for speed-up
-
-            # Step 3: Save the resampled audio
+            new_sr = int(sr * speed)
             sf.write(audio_path, y, new_sr)
-
-            # Step 4: Load the resampled audio at the original sampling rate
-            # This ensures playback is correctly synchronized with the video
             faster_audio, _ = librosa.load(audio_path, sr=sr)
-
-            # Save again to ensure compatibility
             sf.write(audio_path, faster_audio, sr)
 
-
-        # Load the faster audio into your renderer or video synchronization system
         return Audio(audio_path)
+
+    def _count_sounds(self, word: str) -> int:
+        """Estimate the number of sound units in a word.
+
+        Parameters:
+            word (str): The word to analyze.
+
+        Returns:
+            int: The estimated number of sound units.
+        """
+        special_combinations = [
+            "ch", "tch", "sh", "oo", "ld", "ss", "qu", "th", "ph", "ng",
+            "gh", "wh", "kn", "wr", "gn", "sc", "sk", "st", "sp", "spl",
+            "spr", "shr", "scr", "str", "dr", "tr", "bl", "cl", "fl", "gl",
+            "pl", "sl", "br", "cr", "fr", "gr", "pr", "tr", "ou", "ght"
+        ]
+        for combo in special_combinations:
+            word = word.replace(combo, "$")
+        return len(word)
+
+    def _calculate_word_timestamps(self, words: List[str], total_duration: float, first_timestamp: float) -> List[Tuple[float, float]]:
+        """Calculate estimated timestamps for each word based on duration.
+
+        Parameters:
+            words (List[str]): The words to timestamp.
+            total_duration (float): The total audio duration.
+            first_timestamp (float): The timestamp for the first word.
+
+        Returns:
+            List[Tuple[float, float]]: List of (start, end) timestamps per word.
+        """
+        total_sounds = sum(
+            self._count_sounds(re.sub(r"[.,!?]", "", token)) + 2 + (5 if re.search(r"[.,!?]", token) else 0)
+            for token in words
+        )
+        seconds_per_sound = total_duration / total_sounds
+        timestamps = []
+        current_time = first_timestamp
+
+        for token in words:
+            sounds = self._count_sounds(re.sub(r"[.,!?]", "", token)) + 2 + (5 if re.search(r"[.,!?]", token) else 0)
+            word_duration = sounds * seconds_per_sound
+            timestamps.append((current_time, current_time + word_duration))
+            current_time += word_duration
+
+        return timestamps
+
+    def _fix_timestamps(self, words: List[str], timestamps: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        """Resolve overlapping word timestamps by recalculating them locally.
+
+        Parameters:
+            words (List[str]): The list of words.
+            timestamps (List[Tuple[float, float]]): The original timestamps.
+
+        Returns:
+            List[Tuple[float, float]]: The corrected timestamps.
+        """
+        i = 0
+        while i < len(timestamps):
+            j = i + 1
+            while j < len(timestamps) and timestamps[j][0] == timestamps[i][0]:
+                j += 1
+            if j > i + 1:
+                start_idx = max(0, i - 1)
+                end_idx = j
+                selected_words = words[start_idx:end_idx]
+                starting_time = timestamps[start_idx][0]
+                total_duration = timestamps[end_idx - 1][1] - starting_time if end_idx < len(timestamps) else 0
+                corrected = self._calculate_word_timestamps(selected_words, total_duration, starting_time)
+                timestamps[start_idx:end_idx] = corrected
+                i = j
+            else:
+                i += 1
+        return timestamps

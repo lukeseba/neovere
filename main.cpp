@@ -1,5 +1,6 @@
 #include <iostream>
 #include <fstream>
+#include <regex>
 
 #include <QApplication>
 #include <QWidget>
@@ -11,6 +12,8 @@
 #include <QProcess>
 #include <QPlainTextEdit>
 #include <QLineEdit>
+#include <QStackedWidget>
+#include <QRegularExpression>
 
 #include <QFontDatabase>
 #include <QFont>
@@ -90,7 +93,7 @@ void listResourceFiles(const QString &path = ":/") {
     }
 }
 
-bool openProjectFromFile(QStringList* programs, QStringList* videoPaths,  QPlainTextEdit *outputText) {
+bool openProjectFromFile(QStringList* programs, QStringList* mediaPaths,  QPlainTextEdit *outputText) {
     QString fileName = QFileDialog::getOpenFileName(nullptr, "Open File", "", "NEOVERE Files (*.nv);;All Files (*)");
     if (!fileName.isEmpty()) {
         QFile file(fileName);
@@ -117,7 +120,7 @@ bool openProjectFromFile(QStringList* programs, QStringList* videoPaths,  QPlain
                 programs->append(program);
                 i=limit;
             } else if (lines.at(i) == "|>") {
-                videoPaths->append(lines.at(i+1));
+                mediaPaths->append(lines.at(i+1));
                 i++;
             }
         }
@@ -127,7 +130,7 @@ bool openProjectFromFile(QStringList* programs, QStringList* videoPaths,  QPlain
     return true;
 }
 
-void saveProjectToFile(QString programs[], QStringList videoPaths,  QPlainTextEdit *outputText) {
+void saveProjectToFile(QString programs[], QStringList mediaPaths,  QPlainTextEdit *outputText) {
     // Get the file name and location from the user
     QString fileName = QFileDialog::getSaveFileName(
         nullptr, "Save File", "nullnomen.nv", "NEOVERE Files (*.nv);;All Files (*)");
@@ -152,9 +155,9 @@ void saveProjectToFile(QString programs[], QStringList videoPaths,  QPlainTextEd
         out << programs[i].count("\n") + 1 << "\n";
         out << programs[i] << "\n";
     }
-    for (int i = 0; i < videoPaths.size(); i++) {
+    for (int i = 0; i < mediaPaths.size(); i++) {
         out << "|>\n";
-        out << videoPaths.at(i) << "\n";
+        out << mediaPaths.at(i) << "\n";
     }
     file.close();
 
@@ -181,7 +184,7 @@ QString combinePythonFiles(const QStringList &fileNames) {
     return combinedCode;
 }
 
-void remakeNeoverePy(QStringList &videoPath) {
+void remakeNeoverePy(QStringList &mediaPath) {
     QStringList pythonFiles = {
         "header",
         "classes",
@@ -194,9 +197,9 @@ void remakeNeoverePy(QStringList &videoPath) {
     QString fileString = combinePythonFiles(pythonFiles);
     // add all file paths
     QString allPaths = "";
-    for (int i = 0; i < videoPath.length(); i++) {
-        allPaths += "\"" + videoPath.at(i) + "\"";
-        if (i < videoPath.length() - 1) {
+    for (int i = 0; i < mediaPath.length(); i++) {
+        allPaths += "\"" + mediaPath.at(i) + "\"";
+        if (i < mediaPath.length() - 1) {
             allPaths += ", ";
         }
     }
@@ -229,7 +232,7 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
     // Set up environment
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     process->setProcessEnvironment(env);
-    QString pythonExecutable = "python3"; // Adjust for Windows if needed
+    QString pythonExecutable = "python"; // Adjust for Windows if needed
 
     // Connect process output signals
     QObject::connect(process, &QProcess::readyReadStandardOutput, [outputDisplay]() {
@@ -283,13 +286,13 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
     }
 }
 
-void importVideo(QString fileName, QStringList &videoPath, QPlainTextEdit *outputDisplay, TabsWidget *header) {
+void importMedia(QString fileName, QStringList &mediaPath, QPlainTextEdit *outputDisplay, TabsWidget *header) {
     // Extract the base name of the new video (e.g., "render.mp4")
     QString newBaseName = QFileInfo(fileName).fileName();
 
-    // Check if any video in videoPath has the same base name
+    // Check if any video in mediaPath has the same base name
     bool duplicateFound = false;
-    for (const QString &path : videoPath) {
+    for (const QString &path : mediaPath) {
         if (QFileInfo(path).fileName() == newBaseName) {
             duplicateFound = true;
             break;
@@ -303,19 +306,19 @@ void importVideo(QString fileName, QStringList &videoPath, QPlainTextEdit *outpu
     }
 
     // Import the video if no duplicate found
-    videoPath.append(fileName);
+    mediaPath.append(fileName);
     QFile file(fileName);
     outputDisplay->appendPlainText("Imported '" + fileName + "'");
 
     QString tabName = QFileInfo(fileName).baseName();
     header->addTab(tabName, fileName, true);
 
-    remakeNeoverePy(videoPath);
+    remakeNeoverePy(mediaPath);
 }
 
-void removeVideo(QString fileName, QStringList &videoPaths) {
-    videoPaths.removeAll(fileName);
-    remakeNeoverePy(videoPaths);
+void removeVideo(QString fileName, QStringList &mediaPaths) {
+    mediaPaths.removeAll(fileName);
+    remakeNeoverePy(mediaPaths);
 }
 
 void removeImportedTabs(TabsWidget *mediaHeader) {
@@ -334,6 +337,168 @@ void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText, TabsWi
     removeImportedTabs(mediaHeader);
     outputText->appendPlainText("New file created");
 }
+
+
+QString documentPython(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return "Error: Could not open file at " + path;
+    }
+
+    QTextStream in(&file);
+    QString documented;
+    bool insideDefinition = false;
+    bool expectDocstring = false;
+    int headerIndent = 0;
+    bool insideParametersOrReturns = false;
+
+    while (!in.atEnd()) {
+        QString line = in.readLine();
+        QString trimmed = line.trimmed();
+
+        // Detect class
+        QRegularExpression classRegex("^\\s*class\\s+(\\w+)\\s*(\\([^)]*\\))?");
+        QRegularExpressionMatch classMatch = classRegex.match(line);
+
+        // Detect method with parameters and optional return type
+        QRegularExpression methodRegex("^\\s*def\\s+(\\w+)\\s*(\\(.*\\))\\s*(->\\s*[^:]*)?:");
+        QRegularExpressionMatch methodMatch = methodRegex.match(line);
+
+        if (classMatch.hasMatch()) {
+            QString className = classMatch.captured(1);
+            QString baseClasses = classMatch.captured(2);
+            if (baseClasses.isNull()) {
+                baseClasses = "";
+            }
+
+            // Only document public classes (those that don't start with '_')
+            if (!className.startsWith("_")) {
+                if (insideDefinition) {
+                    documented += "\n";
+                }
+
+                int indent = line.indexOf(QRegularExpression("\\S")); // Find the first non-whitespace character
+                documented += QString(0, ' ') + "class " + className + baseClasses + ":\n";
+                insideDefinition = true;
+                expectDocstring = true;
+                headerIndent = indent;
+            }
+            continue;
+        }
+
+        if (methodMatch.hasMatch()) {
+            QString methodName = methodMatch.captured(1);
+            // Skip private methods or methods starting with a single '_', but not '__init__'
+            if (methodName.startsWith("_") && !methodName.startsWith("__init__")) {
+                continue;  // Skip this method entirely
+            }
+
+            QString parameters = methodMatch.captured(2);
+            QString returnType = methodMatch.captured(3);
+
+            // Always indent function signatures by 4 spaces
+            int indent = 4;
+
+            // Clean parameters: remove "self" if present
+            parameters = parameters.trimmed();
+            if (parameters.startsWith("(") && parameters.endsWith(")")) {
+                QString innerParams = parameters.mid(1, parameters.length() - 2).trimmed();
+                QStringList paramList = innerParams.split(",", Qt::SkipEmptyParts);
+
+                // Remove 'self' from param list
+                QStringList cleanedParams;
+                for (QString param : paramList) {
+                    param = param.trimmed();
+                    if (param != "self") {
+                        cleanedParams.append(param);
+                    }
+                }
+
+                parameters = "(" + cleanedParams.join(", ") + ")";
+            }
+
+            QString signature = methodName + parameters;
+            if (!returnType.isEmpty()) {
+                signature += " " + returnType.trimmed();
+            }
+            signature += ":";
+
+            if (insideDefinition) {
+                documented += "\n";
+            }
+
+            // Add 4 spaces of indentation for method definitions
+            documented += QString(indent, ' ') + signature + "\n";
+
+            insideDefinition = true;
+            expectDocstring = true;
+            headerIndent = indent;
+            continue;
+        }
+
+        if (expectDocstring && trimmed.startsWith("\"\"\"")) {
+            QStringList docLines;
+
+            QString temp = trimmed.mid(3);
+
+            if (temp.endsWith("\"\"\"")) {
+                temp.chop(3);
+                docLines << temp.trimmed();
+            } else {
+                docLines << temp.trimmed();
+                while (!in.atEnd()) {
+                    QString nextLine = in.readLine();
+                    QString nextTrimmed = nextLine.trimmed();
+                    if (nextTrimmed.endsWith("\"\"\"")) {
+                        docLines << nextTrimmed.left(nextTrimmed.length() - 3).trimmed();
+                        break;
+                    } else {
+                        docLines << nextTrimmed;
+                    }
+                }
+            }
+
+            // Process docstring
+            for (const QString& docLine : docLines) {
+                if (docLine.isEmpty()) {
+                    documented += "#\n"; // Empty line
+                    insideParametersOrReturns = false;
+                    continue;
+                }
+
+                QString lowered = docLine.toLower();
+                if (lowered.startsWith("parameters:") ||
+                    lowered.startsWith("returns:") ||
+                    lowered.startsWith("raises:")) {
+                    documented += "#" + QString(headerIndent, ' ') + docLine + "\n";
+                    insideParametersOrReturns = true;
+                    continue;
+                }
+
+                if (insideParametersOrReturns) {
+                    documented += "#" + QString(headerIndent + 4, ' ') + docLine + "\n";
+                } else {
+                    documented += "#" + QString(headerIndent, ' ') + docLine + "\n";
+                }
+            }
+
+            expectDocstring = false;
+            continue;
+        }
+
+        if (insideDefinition) {
+            if (trimmed.isEmpty()) {
+                documented += "\n";
+                insideDefinition = false;
+            }
+            continue;
+        }
+    }
+
+    return documented;
+}
+
+
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -362,7 +527,7 @@ int main(int argc, char *argv[]) {
     QFont arial = setFont(":/resources/fonts/arial-bold.ttf");
 
     // project data
-    QStringList videoPath;
+    QStringList mediaPath;
     QString currentVideo = "";
 
     // Main window widget
@@ -406,7 +571,6 @@ int main(int argc, char *argv[]) {
     topButtonWidget->setLayout(topButtonLayout);
 
     // Create the button layout at the bottom the screen
-
     QPushButton *runButton = new QPushButton("▶️");
     QPushButton *uploadButton = new QPushButton("I M P O R T");
     uploadButton->setFont(sftel_bold);
@@ -432,11 +596,19 @@ int main(int argc, char *argv[]) {
     leftLayout->addWidget(bottomButtonWidget);
 
     // Create the right panel
+    // create help / media tab header
+    TabsWidget *rightSideTabs  = new TabsWidget(false);
+    rightSideTabs->setTabsFont(sftel_bold);
+    rightSideTabs->addTab("M E D I A", "", false);
+    rightSideTabs->addTab("C O M M A N D S", "", false);
+    rightSideTabs->selectTab(0);
+
+
     // create video headers
     TabsWidget *mediaHeader = new TabsWidget();
-    mediaHeader->setTabsFont(sftel_bold);
-    mediaHeader->setLabelFont(dotim5);
-    importVideo("render.mp4", videoPath, codePanel, mediaHeader);
+    mediaHeader->setTabsFont(dotim5);
+    mediaHeader->setLabelFont(dotim7);
+    importMedia("render.mp4", mediaPath, codePanel, mediaHeader);
     mediaHeader->getTab(0)->closeable = false;
 
 
@@ -479,11 +651,83 @@ int main(int argc, char *argv[]) {
 
     mediaControlsWidget->setLayout(mediaControlsLayout);
 
+    // create media container
+    QWidget *mediaContainer = new QWidget();
+    QVBoxLayout *mediaContainerLayout = new QVBoxLayout(mediaContainer);
+    mediaContainerLayout->addWidget(outputDisplay);
+    mediaContainerLayout->addWidget(mediaHeader);
+    mediaContainerLayout->addWidget(mediaPanel);
+    mediaContainerLayout->addWidget(mediaControlsWidget);
+    mediaContainerLayout->addWidget(outputDisplay);
+
+    // create command tabs header
+    TabsWidget *commandsHeader = new TabsWidget();
+    commandsHeader->setTabsFont(dotim5);
+    commandsHeader->setLabelFont(dotim7);
+    commandsHeader->addTab("Filters", "Filters", false);
+    commandsHeader->addTab("Fields", "Fields", false);
+    commandsHeader->addTab("Other", "Other", false);
+    commandsHeader->selectTab(0);
+
+    // craate commands help container
+    QWidget *commandsContainer = new QWidget();
+    QVBoxLayout *commandsContainerLayout = new QVBoxLayout(commandsContainer);
+    commandsContainerLayout->addWidget(commandsHeader);
+    QPlainTextEdit *commandsText = new QPlainTextEdit();
+    new PythonHighlighter(commandsText->document());
+    commandsText->setFont(dotim5);
+    commandsText->setReadOnly(true);
+    commandsText->setLineWrapMode(QPlainTextEdit::NoWrap);
+
+    bool docOverride = true;
+
+    QStringList docSources = {
+        "filters",
+        "fields",
+        "classes"
+    };
+    QString docsText[3];
+
+    for (int i = 0; i < docSources.size(); i++) {
+        QString docName = docSources.at(i);
+        QString docPath = "documentation/" + docName + ".txt";
+
+        QFile docFile(docPath);
+
+        if (docFile.exists() && docOverride == false) {
+            // Read from the existing documentation .txt file
+            if (docFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QTextStream in(&docFile);
+                docsText[i] = in.readAll();
+                docFile.close();
+            } else {
+                // Fall back if reading fails
+                docsText[i] = documentPython(":/resources/code/" + docName + ".py");
+            }
+        } else {
+            // Generate documentation
+            docsText[i] = documentPython(":/resources/code/" + docName + ".py");
+
+            // Save the generated documentation
+            if (docFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&docFile);
+                out << docsText[i];
+                docFile.close();
+            }
+        }
+    }
+
+    commandsText->setPlainText(docsText[0]);
+    commandsContainerLayout->addWidget(commandsText);
+
+    // create tabbed right side widgets
+    QStackedWidget *rightStack = new QStackedWidget();
+    rightStack->addWidget(mediaContainer);
+    rightStack->addWidget(commandsContainer);
+
     // put right panel together
-    rightLayout->addWidget(mediaHeader);
-    rightLayout->addWidget(mediaPanel);
-    rightLayout->addWidget(mediaControlsWidget);
-    rightLayout->addWidget(outputDisplay);
+    rightLayout->addWidget(rightSideTabs);
+    rightLayout->addWidget(rightStack);
 
     QWidget *leftWidget = new QWidget;
     QWidget *rightWidget = new QWidget;
@@ -499,7 +743,7 @@ int main(int argc, char *argv[]) {
     outputDisplay->setFont(dotrice);
 
     // generote neovere.py file
-    remakeNeoverePy(videoPath);
+    remakeNeoverePy(mediaPath);
 
     // open default file
     createNewFile(codePanel, outputDisplay, mediaHeader);
@@ -513,15 +757,15 @@ int main(int argc, char *argv[]) {
     });
 
     // Make the import button import a media file
-    QObject::connect(uploadButton, &QPushButton::clicked, [&window, &videoPath, outputDisplay, mediaPanel, mediaHeader]() {
-        QString fileName = QFileDialog::getOpenFileName(&window, "Open File", "", "Video Files (*.mp4);;All Files (*)");
+    QObject::connect(uploadButton, &QPushButton::clicked, [&window, &mediaPath, outputDisplay, mediaPanel, mediaHeader]() {
+        QString fileName = QFileDialog::getOpenFileName(&window, "Open File", "", "Media Files (*.mp4 *.mp3);;All Files (*)");
         if (!fileName.isEmpty()) {
-            importVideo(fileName, videoPath, outputDisplay, mediaHeader);
+            importMedia(fileName, mediaPath, outputDisplay, mediaHeader);
         }
     });
 
     // Make the open button open a nv file
-    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &videoPath, mediaHeader]() {
+    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath, mediaHeader]() {
         QStringList programs;
         QStringList videos;
 
@@ -531,14 +775,14 @@ int main(int argc, char *argv[]) {
             }
             removeImportedTabs(mediaHeader);
             for (const QString &video : videos) {
-                importVideo(video, videoPath, outputDisplay, mediaHeader);
+                importMedia(video, mediaPath, outputDisplay, mediaHeader);
             }
         }
     });
 
 
-    QObject::connect(mediaHeader, &TabsWidget::tabRemoved, [mediaHeader, &videoPath, mediaPanel, videoSlider](int index) {
-        removeVideo(mediaHeader->getTab(index)->getData(), videoPath);
+    QObject::connect(mediaHeader, &TabsWidget::tabRemoved, [mediaHeader, &mediaPath, mediaPanel, videoSlider](int index) {
+        removeVideo(mediaHeader->getTab(index)->getData(), mediaPath);
         mediaPanel->setVideo("");
         videoSlider->updateTimeStamp(0,0);
     });
@@ -565,10 +809,20 @@ int main(int argc, char *argv[]) {
 
 
     // Make save button download file
-    QObject::connect(saveButton, &QPushButton::clicked, [codePanel, outputDisplay, &videoPath]() {
+    QObject::connect(saveButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath]() {
         QString programs[] = {codePanel->toPlainText()};
 
-        saveProjectToFile(programs, videoPath, outputDisplay);
+        saveProjectToFile(programs, mediaPath, outputDisplay);
+    });
+
+    // change from media to command tabs
+    QObject::connect(rightSideTabs, &TabsWidget::tabSelected, [rightStack](int index) {
+        rightStack->setCurrentIndex(index);
+    });
+
+    // change documentation based on selected tab
+    QObject::connect(commandsHeader, &TabsWidget::tabSelected, [docsText, commandsText](int index) {
+        commandsText->setPlainText(docsText[index]);
     });
 
     // ---------- FINAL SETUP ---------------

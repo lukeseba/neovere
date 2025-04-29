@@ -1,0 +1,462 @@
+class FrameAudio:
+
+    __init__(audio_data: dict) -> None:
+#    Initialize a FrameAudio object with per-frame audio data.
+#
+#    Parameters:
+#        audio_data (dict): A dictionary containing audio features for the frame.
+#        Expected keys:
+#        - 'volume' (float): Root-mean-square volume of the frame.
+#        - 'frequencies' (np.ndarray): Array of frequency bins.
+#        - 'magnitude' (np.ndarray): Array of magnitudes corresponding to the frequencies.
+#
+
+    get_volume() -> float:
+#    Retrieve the root-mean-square volume of the frame.
+#
+#    Returns:
+#        float: The volume level for the frame.
+#
+
+    get_frequency(freq: int) -> float:
+#    Retrieve the magnitude of a specific frequency within the frame.
+#
+#    Parameters:
+#        freq (int): The frequency (in Hz) to retrieve the magnitude for.
+#
+#    Returns:
+#        float: Magnitude corresponding to the requested frequency.
+#
+#    Raises:
+#        ValueError: If the frequency is outside the valid range of the available data.
+#
+
+    list_frequencies() -> np.ndarray:
+#    List all frequency bins available in the frame.
+#
+#    Returns:
+#        np.ndarray: Array of frequencies (in Hz).
+#
+
+    list_magnitudes() -> np.ndarray:
+#    List all magnitude values corresponding to the frequency bins.
+#
+#    Returns:
+#        np.ndarray: Array of magnitudes.
+#
+
+class Frame:
+#A class to represent and manipulate a single frame of pixel data.
+
+    __init__(pixels: np.ndarray) -> None:
+#    Initialize the Frame with a 2D or 3D NumPy array of pixel data.
+#
+#    Parameters:
+#        pixels (np.ndarray): A 2D (grayscale) or 3D (color) NumPy array representing the frame's pixels.
+#
+
+    apply_filter(filter) -> None:
+#    Apply a filter object to the frame's pixels.
+#
+#    Parameters:
+#        filter: A filter to apply to the frame
+#
+
+    get_pixels(standard_size: bool = False) -> np.ndarray:
+#    Return the frame's pixel data as a NumPy array.
+#
+#    Parameters:
+#        standard_size (bool): If True, returns pixels in uint8 format; otherwise, returns uint16.
+#
+#    Returns:
+#        np.ndarray: The pixel data of the frame.
+#
+
+    modify(func) -> None:
+#    Apply a user-defined function to each pixel in the frame.
+#
+#    Parameters:
+#        func (callable): A function that takes (x, y, pixel) and returns a modified pixel array.
+#
+
+    resize(w: int, h: int) -> None:
+#    Resize the frame to a new width and height.
+#
+#    Parameters:
+#        w (int): The target width.
+#        h (int): The target height.
+#
+
+    set_width(w: int) -> None:
+#    Set a new width for the frame while keeping the current height.
+#
+#    Parameters:
+#        w (int): The new width in pixels.
+#
+
+    set_height(h: int) -> None:
+#    Set a new height for the frame while keeping the current width.
+#
+#    Parameters:
+#        h (int): The new height in pixels.
+#
+
+    width() -> int:
+#    Return the current width of the frame.
+#
+#    Returns:
+#        int: Width in pixels.
+#
+
+    height() -> int:
+#    Return the current height of the frame.
+#
+#    Returns:
+#        int: Height in pixels.
+#
+
+    preview(wait_for_exit: bool = False, title: str = "Frame Preview") -> None:
+#    Display the frame in a window for previewing.
+#
+#    Parameters:
+#        wait_for_exit (bool): If True, waits until the user closes the window or presses 'q' key.
+#        title (str): The window title for the preview.
+#
+
+    crop(x1: int, y1: int, x2: int, y2: int) -> None:
+#    Crop the frame to a rectangle defined by two corners.
+#
+#    Parameters:
+#        x1 (int): Left (starting) x-coordinate.
+#        y1 (int): Top (starting) y-coordinate.
+#        x2 (int): Right (ending) x-coordinate.
+#        y2 (int): Bottom (ending) y-coordinate.
+#
+
+class Color_Frame(Frame):
+#A class to represent and manipulate a frame composed of a single RGB color
+
+    __init__(width: int, height: int, color: tuple = (0, 0, 0)):
+#    Initialize a Color_Frame with a specified width, height, and an optional RGB color.
+#
+#    Parameters:
+#        width (int): The width of the frame in pixels.
+#        height (int): The height of the frame in pixels.
+#        color (tuple, optional): A tuple representing the RGB color to fill the frame.
+#        Defaults to (0, 0, 0), which is black.
+#
+#    Raises:
+#        ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
+#
+
+    change_color(color: tuple) -> None:
+#    Change the entire frame's color to the specified RGB value.
+#
+#    Parameters:
+#        color (tuple): A tuple representing the new RGB color to set the frame to.
+#
+#    Raises:
+#        ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
+#
+
+class Video:
+#A class to represent and manipulate a video file, including reading frames and extracting audio.
+
+    __init__(video_path: str) -> None:
+#    Initialize the Video object by opening the video file, extracting basic properties,
+#    and checking if it contains audio.
+#
+#    Parameters:
+#        video_path (str): Path to the video file to be loaded.
+#
+#    Raises:
+#        SystemExit: If the video file cannot be opened, exits the program.
+#
+
+    open() -> None:
+#    Open the video file using OpenCV's VideoCapture.
+#
+#    This method is called during initialization to ensure the video is ready to be processed.
+#
+
+    close() -> None:
+#    Release the video file and free any associated resources.
+#
+
+    get_frame(frame_index: int, w=1.0, h=None) -> Frame:
+#    Retrieve a specific frame by its index and optionally resize it.
+#
+#    Parameters:
+#        frame_index (int): The index of the frame to retrieve.
+#        w (float, optional): A scaling factor for the width. Defaults to 1.0 (no scaling).
+#        h (int, optional): The target height for resizing. If None, the height is scaled proportionally.
+#
+#    Returns:
+#        Frame: A Frame object containing the requested video frame.
+#
+#    Raises:
+#        ValueError: If the frame index is out of bounds or if the frame cannot be read.
+#
+
+    frame_duration() -> int:
+#    Get the total number of frames in the video.
+#
+#    Returns:
+#        int: The total frame count.
+#
+
+    fps() -> int:
+#    Get the frames per second (FPS) of the video.
+#
+#    Returns:
+#        float: The FPS value of the video.
+#
+
+    width() -> int:
+#    Get the width of the video.
+#
+#    Returns:
+#        int: The width of the video in pixels.
+#
+
+    height() -> int:
+#    Get the height of the video.
+#
+#    Returns:
+#        int: The height of the video in pixels.
+#
+
+    resize(w: int, h: int) -> None:
+#    Resize the video to the specified width and height.
+#
+#    Parameters:
+#        w (int): The target width in pixels.
+#        h (int): The target height in pixels.
+#
+
+    set_width(w: int) -> None:
+#    Set a new width for the video while keeping the current height.
+#
+#    Parameters:
+#        w (int): The new width in pixels.
+#
+
+    set_height(h: int) -> None:
+#    Set a new height for the video while keeping the current width.
+#
+#    Parameters:
+#        h (int): The new height in pixels.
+#
+
+    frame_audio(index: int) -> FrameAudio:
+#    Get the audio frame corresponding to the given video frame index.
+#
+#    Parameters:
+#        index (int): The index of the video frame.
+#
+#    Returns:
+#        FrameAudio: The corresponding audio frame for the specified video frame.
+#
+
+class Audio:
+
+    __init__(file_path: str) -> None:
+#    Initialize an Audio object with a given file path.
+#
+#    Parameters:
+#        file_path (str): Path to the MP4, MP3, or WAV file.
+#
+#    Raises:
+#        ValueError: If the provided file extension is unsupported.
+#
+
+    preload_data(reload: bool = False) -> None:
+#    Preload and process audio into per-frame features (volume, spectrum) for faster access.
+#
+#    Parameters:
+#        reload (bool): Whether to force reloading even if cached data exists.
+#
+
+    frame_audio(frame_index: int) -> FrameAudio:
+#    Retrieve audio data corresponding to a specific frame.
+#
+#    Parameters:
+#        frame_index (int): The frame index to retrieve.
+#
+#    Returns:
+#        FrameAudio: Audio features (volume, frequencies, magnitude) for the requested frame.
+#
+#    Raises:
+#        ValueError: If preload_data() has not been called before accessing frame data.
+#
+
+    length() -> float:
+#    Return the length of the audio in seconds.
+#
+#    Returns:
+#        float: Total duration of the audio file.
+#
+
+    fps() -> float:
+#    Get the frames per second associated with the video or assumed for audio.
+#
+#    Returns:
+#        float: Frames per second value.
+#
+
+    file_type() -> str:
+#    Return the file type for this Audio object.
+#
+#    Returns:
+#        str: File type ('mp4', 'mp3', or 'wav').
+#
+
+    file_path() -> str:
+#    Return the original file path provided during initialization.
+#
+#    Returns:
+#        str: File path.
+#
+
+class NonlinearRenderer:
+
+    __init__(width: int, height: int, fps: int) -> None:
+#    Initialize a NonlinearRenderer for rendering video frames non-sequentially.
+#
+#    Parameters:
+#        width (int): Width of the output video in pixels.
+#        height (int): Height of the output video in pixels.
+#        fps (int): Frames per second for the output video.
+#
+
+    set_frame(frame_index: int, new_frame: 'Frame') -> None:
+#    Set a frame at a specific index for the output video.
+#
+#    Parameters:
+#        frame_index (int): The index at which the frame will be placed.
+#        new_frame (Frame): Frame object containing pixel data.
+#
+#    Raises:
+#        ValueError: If the frame dimensions do not match the initialized resolution.
+#
+
+    attach_audio(audio: 'Audio', volume: float = 1.0) -> None:
+#    Attach an Audio object to the renderer with a specified volume adjustment.
+#
+#    Parameters:
+#        audio (Audio): The Audio object containing the audio data.
+#        volume (float, optional): Volume multiplier between 0.0 and 1.0. Defaults to 1.0.
+#
+#    Raises:
+#        ValueError: If the volume is not between 0.0 and 1.0.
+#
+
+    set_resolution(width: int, height: int) -> None:
+#    Change the resolution of the output video.
+#
+#    Parameters:
+#        width (int): New width in pixels.
+#        height (int): New height in pixels.
+#
+
+    set_fps(fps: int) -> None:
+#    Change the frames per second (fps) of the output video.
+#
+#    Parameters:
+#        fps (int): New frames per second value.
+#
+
+    fps() -> int:
+#    Get the current frames per second (fps).
+#
+#    Returns:
+#        int: Current fps value.
+#
+
+    width() -> int:
+#    Get the current video width.
+#
+#    Returns:
+#        int: Current width in pixels.
+#
+
+    height() -> int:
+#    Get the current video height.
+#
+#    Returns:
+#        int: Current height in pixels.
+#
+
+    sec_to_frame(seconds: Union[float, int, List[float]]) -> Union[int, List[int]]:
+#    Convert seconds to frame indices based on the fps.
+#
+#    Parameters:
+#        seconds (float | int | List[float]): Time(s) in seconds.
+#
+#    Returns:
+#        int | List[int]: Corresponding frame index or list of frame indices.
+#
+#    Raises:
+#        TypeError: If input type is invalid.
+#
+
+    render(preview: bool = False) -> None:
+#    Render the final ordered video and optionally attach audio tracks.
+#
+#    Parameters:
+#        preview (bool, optional): Whether to preview each frame during rendering. Defaults to False.
+#
+#    Raises:
+#        ValueError: If frames cannot be read during rendering.
+#
+
+class Bot:
+#Chatbot that can generate text responses, synthesize speech, and transcribe audio.
+
+    __init__(personality: str = "You are a helpful chatbot.", unique_key: Optional[str] = None, voice: str = "onyx") -> None:
+#    Initialize a Bot instance.
+#
+#    Parameters:
+#        personality (str): The system prompt defining the chatbot's behavior.
+#        unique_key (Optional[str]): An optional API key to override the default.
+#        voice (str): Voice model name used for text-to-speech synthesis.
+#
+
+    set_personality(personality: str) -> None:
+#    Update the chatbot's system prompt.
+#
+#    Parameters:
+#        personality (str): The new system prompt to use.
+#
+
+    prompt(input_text: str) -> str:
+#    Generate a chatbot response for a given user input.
+#
+#    Parameters:
+#        input_text (str): The user's input message.
+#
+#    Returns:
+#        str: The chatbot's generated response.
+#
+
+    transcribe(audio: 'Audio') -> Tuple[List[str], List[Tuple[float, float]]]:
+#    Transcribe spoken audio into text with word-level timestamps.
+#
+#    Parameters:
+#        audio (Audio): The audio object to transcribe.
+#
+#    Returns:
+#        Tuple[List[str], List[Tuple[float, float]]]: A list of words and their corresponding (start, end) timestamps.
+#
+
+    speak(text: str, speed: float = 1.0) -> 'Audio':
+#    Synthesize speech from text and optionally adjust its playback speed.
+#
+#    Parameters:
+#        text (str): The text to convert into speech.
+#        speed (float): A multiplier to adjust the playback speed (default is 1.0).
+#
+#    Returns:
+#        Audio: An Audio object containing the synthesized speech.
+#
+

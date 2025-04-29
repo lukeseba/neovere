@@ -1,57 +1,122 @@
 if len(_paths) != 0:
     class Filter:
-        def __init__(self, field: Field = None):
-            if field == None:
+        """A filter that aligns a Field object with the current renderer dimensions."""
+
+        def __init__(self, field: Optional[Field] = None) -> None:
+            """Initialize a Filter instance.
+
+            Parameters:
+                field (Optional[Field]): A Field object to apply the filter on.
+                    If None, a default FOverlay() field will be used.
+            """
+            if field is None:
                 field = FOverlay()
             self.set_field(field)
 
-        def set_field(self, field: Field):
-            self.field = field
-            full_map = self.field.get_map()[:, :, np.newaxis]  # Original map
+        def set_field(self, field: Field) -> 'Filter':
+            """Set a new Field and crop its map to match the renderer dimensions.
 
-            # Get renderer dimensions
+            Parameters:
+                field (Field): The Field object containing the source map.
+
+            Returns:
+                Filter: The Filter instance itself (for method chaining).
+            """
+            self.field = field
+            full_map = self.field.get_map()[:, :, np.newaxis]
+
             render_height = renderer.height()
             render_width = renderer.width()
 
-            # Get original dimensions
             orig_height, orig_width = full_map.shape[:2]
 
-            # Calculate cropping boundaries (centered)
             start_y = max((orig_height - render_height) // 2, 0)
             start_x = max((orig_width - render_width) // 2, 0)
             end_y = start_y + min(render_height, orig_height)
             end_x = start_x + min(render_width, orig_width)
 
-            # Crop the map
             self._map = full_map[start_y:end_y, start_x:end_x]
 
             return self
 
-        def apply(self, pixels):
+        def _apply(self, pixels: np.ndarray) -> None:
+            """Apply the filter to a set of pixels.
+
+            Parameters:
+                pixels (np.ndarray): The pixel data to process.
+
+            Note:
+                This method is currently a placeholder and must be implemented.
+            """
             pass
 
     class Solid_Color(Filter):
-        def __init__(self, r: int, g: int, b: int, field: Field = None):
+        """A filter that overlays a solid color onto a Field-based mask."""
+
+        def __init__(self, r: int, g: int, b: int, field: Optional[Field] = None) -> None:
+            """Initialize a Solid_Color filter.
+
+            Parameters:
+                r (int): Red component of the color (0–255).
+                g (int): Green component of the color (0–255).
+                b (int): Blue component of the color (0–255).
+                field (Optional[Field]): Field object providing the overlay mask.
+                    If None, a default FOverlay() field will be used.
+            """
             super().__init__(field)
             self.__r = r
             self.__g = g
             self.__b = b
 
-        def invert(self):
+        def invert(self) -> 'Solid_Color':
+            """Invert the solid color (i.e., subtract each RGB component from 255).
+
+            Returns:
+                Solid_Color: The Solid_Color instance itself (for method chaining).
+            """
             self.__r = 255 - self.__r
             self.__g = 255 - self.__g
             self.__b = 255 - self.__b
             return self
 
-        def apply(self, pixels):
-            pixels = np.clip((pixels * (1 - self._map) + [self.__b, self.__g, self.__r] * self._map), 0, 255)
+        def apply(self, pixels: np.ndarray) -> np.ndarray:
+            """Apply the solid color filter to pixel data using the field mask.
+
+            Parameters:
+                pixels (np.ndarray): The pixel data to apply the color filter to.
+
+            Returns:
+                np.ndarray: The color-modified pixel data.
+            """
+            pixels = np.clip(
+                (pixels * (1 - self._map) + [self.__b, self.__g, self.__r] * self._map),
+                0, 255
+            )
             return pixels
 
     class Invert(Filter):
-        def __init__(self, field: Field = None):
+        """A filter that inverts the colors of a Field-based mask."""
+
+        def __init__(self, field: Optional[Field] = None) -> None:
+            """Initialize an Invert filter.
+
+            Parameters:
+                field (Optional[Field]): Field object providing the overlay mask.
+                    If None, a default FOverlay() field will be used.
+            """
             super().__init__(field)
 
-        def apply(self, pixels):
+        def apply(self, pixels: np.ndarray) -> np.ndarray:
+            """Apply the inversion filter to pixel data using the field mask.
+
+            This method inverts the pixel colors and blends them based on the map values.
+
+            Parameters:
+                pixels (np.ndarray): The pixel data to apply the inversion filter to.
+
+            Returns:
+                np.ndarray: The color-inverted and blended pixel data, clipped to the valid range [0, 255].
+            """
             # Invert the pixels
             inverted_pixels = 255 - pixels
 
@@ -61,7 +126,17 @@ if len(_paths) != 0:
             return np.clip(filtered_pixels, 0, 255)
 
     class Draw_Frame(Filter):
-        def __init__(self, frame: Frame, x: int = None, y: int = None, field: Field = None):
+        """A filter that draws a frame onto an image at a specified position."""
+
+        def __init__(self, frame: Frame, x: Optional[int] = None, y: Optional[int] = None, field: Optional[Field] = None) -> None:
+            """Initialize a Draw_Frame filter.
+
+            Parameters:
+                frame (Frame): The Frame object that will be drawn onto the image.
+                x (Optional[int]): The x-coordinate for positioning the frame. If None, the frame is centered.
+                y (Optional[int]): The y-coordinate for positioning the frame. If None, the frame is centered.
+                field (Optional[Field]): Field object providing the overlay mask. Defaults to FOverlay() if None.
+            """
             if field is None:
                 field = FOverlay()
             super().__init__(field)
@@ -69,12 +144,17 @@ if len(_paths) != 0:
             self.x = x
             self.y = y
 
-        def apply(self, pixels):
-            """
-            Applies the frame to the given pixels at the specified (x, y) position.
-            - If `x` and `y` are None, the frame is centered.
-            - If the frame extends beyond the image bounds, it is cropped.
-            - Any uncovered space is filled with the original pixels.
+        def apply(self, pixels: np.ndarray) -> np.ndarray:
+            """Apply the frame to the given pixels at the specified (x, y) position.
+
+            If `x` and `y` are None, the frame is centered. If the frame extends beyond the image bounds, it is cropped.
+            Any uncovered space is filled with the original pixels.
+
+            Parameters:
+                pixels (np.ndarray): The pixel data onto which the frame will be applied.
+
+            Returns:
+                np.ndarray: The image with the frame applied at the specified position, blended with the field map.
             """
             frame_pixels = self.frame.get_pixels()
             frame_h, frame_w = frame_pixels.shape[:2]
@@ -116,23 +196,44 @@ if len(_paths) != 0:
             # Blend with the field map
             return np.clip(self._map * new_frame + (1 - self._map) * pixels, 0, 255)
 
-        def set_position(self, x: int, y: int):
-            """Updates the frame's position."""
+        def set_position(self, x: int, y: int) -> 'Draw_Frame':
+            """Updates the frame's position.
+
+            Parameters:
+                x (int): The new x-coordinate for the frame.
+                y (int): The new y-coordinate for the frame.
+
+            Returns:
+                Draw_Frame: The current instance with updated position.
+            """
             self.x = x
             self.y = y
             return self
 
-        def invert(self):
+        def invert(self) -> 'Draw_Frame':
+            """Invert the frame colors.
+
+            Returns:
+                Draw_Frame: The current instance with the inverted frame.
+            """
             self.frame = Frame(255 - self.frame.get_pixels())
             return self
 
-        def mirror_x(self):
-            """Mirror the frame along the x-axis (horizontal flip)."""
+        def mirror_x(self) -> 'Draw_Frame':
+            """Mirror the frame along the x-axis (horizontal flip).
+
+            Returns:
+                Draw_Frame: The current instance with the frame mirrored along the x-axis.
+            """
             self.frame = Frame(cv2.flip(self.frame.get_pixels(), 1))
             return self
 
-        def mirror_y(self):
-            """Mirror the frame along the y-axis (vertical flip)."""
+        def mirror_y(self) -> 'Draw_Frame':
+            """Mirror the frame along the y-axis (vertical flip).
+
+            Returns:
+                Draw_Frame: The current instance with the frame mirrored along the y-axis.
+            """
             self.frame = Frame(cv2.flip(self.frame.get_pixels(), 0))
             return self
 

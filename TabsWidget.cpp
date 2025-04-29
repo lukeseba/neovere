@@ -5,7 +5,7 @@
 #include <qstyle.h>
 #include <QTextBlock>
 
-TabsWidget::TabsWidget(QWidget *parent) : QWidget(parent), currentFont(QFont())
+TabsWidget::TabsWidget(bool includeLabel, bool buttonStyleTabs, QWidget *parent) : QWidget(parent), currentFont(QFont())
 {
     layout = new QGridLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -13,15 +13,22 @@ TabsWidget::TabsWidget(QWidget *parent) : QWidget(parent), currentFont(QFont())
     mainWidget = new QWidget(this);
     mainWidget->setLayout(layout);
 
-    nameLabel = new QLineEdit(mainWidget);
-    nameLabel->setAlignment(Qt::AlignCenter);
-    nameLabel->setReadOnly(true);
-    nameLabel->setStyleSheet("QLineEdit{ background-color: white;  color: black; border: 0px;}"
-                                        );
+    hasLabel = includeLabel;
+    buttonStyleTabs = buttonStyleTabs;
+
+    if (hasLabel) {
+        nameLabel = new QLineEdit(mainWidget);
+        nameLabel->setAlignment(Qt::AlignCenter);
+        nameLabel->setReadOnly(true);
+        nameLabel->setStyleSheet("QLineEdit{ background-color: white;  color: black; border: 0px;}"
+                                            );
+    }
 
     mainLayout = new QVBoxLayout(this);
     mainLayout->addWidget(mainWidget);
-    mainLayout->addWidget(nameLabel);
+    if (hasLabel) {
+        mainLayout->addWidget(nameLabel);
+    }
     mainWidget->setMinimumWidth(1);
     setLayout(mainLayout);
 }
@@ -101,7 +108,9 @@ void TabsWidget::setTabsFont(const QFont &font)
 
 void TabsWidget::setLabelFont(const QFont &font)
 {
-    nameLabel->setFont(font);
+    if (hasLabel) {
+        nameLabel->setFont(font);
+    }
 }
 
 void TabsWidget::updateTabGrid()
@@ -139,7 +148,9 @@ void TabsWidget::deselectCurrentTab()
         currentTab->button()->setChecked(false);
         currentTab->closeButton()->setVisible(false); // Hide the "x" button
 
-        nameLabel->setText("");
+        if (hasLabel) {
+            nameLabel->setText("");
+        }
         selectedTabIndex = -1;
     }
 }
@@ -167,7 +178,9 @@ void TabsWidget::selectTab(int index) {
         newTab->closeButton()->setVisible(true); // Show the "x" button
     }
 
-    nameLabel->setText(tabs.at(selectedTabIndex)->text());
+    if (hasLabel) {
+        nameLabel->setText(tabs.at(selectedTabIndex)->text());
+    }
 
     emit tabSelected(index);
 }

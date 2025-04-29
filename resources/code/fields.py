@@ -1,451 +1,652 @@
 if len(_paths) != 0:
     class Field:
-        def __init__(self):
-            self._map = np.zeros((renderer.height(), renderer.width()), dtype = np.uint8)
+        def __init__(self) -> None:
+            """Initialize a Field object with a blank, zero-filled map.
+
+            The map is initialized with dimensions based on the renderer and
+            stores 8-bit unsigned integer values (0–255).
+            """
+            self._map = np.zeros((renderer.height(), renderer.width()), dtype=np.uint8)
             self.inverted = False
 
-        def get(self, x: int, y: int):
+        def get(self, x: int, y: int) -> np.float16:
+            """Retrieve the normalized value at a given coordinate.
+
+            Parameters:
+                x (int): X-coordinate (column index).
+                y (int): Y-coordinate (row index).
+
+            Returns:
+                np.float16: The value at (x, y), normalized to [0, 1].
+            """
             return (self._map[y][x] / 255).astype(np.float16)
 
-        def set(self, value: float, x: int, y: int):
+        def set(self, value: float, x: int, y: int) -> None:
+            """Set a normalized value at a given coordinate.
+
+            Parameters:
+                value (float): Value between 0 and 1.
+                x (int): X-coordinate.
+                y (int): Y-coordinate.
+            """
             self._map[y][x] = int(value * 255)
 
-        def add(self, other):
+        def add(self, other: 'Field' or float) -> 'Field':
+            """Add another Field or a scalar to this Field.
+
+            Parameters:
+                other (Field or float): Field or scalar value to add.
+
+            Returns:
+                Field: The updated Field object.
+            """
             if isinstance(other, Field):
                 return self.add(other.get_map())
-            else:
-                self._map = np.clip(self._map.astype(np.int16) + other*255, 0, 255).astype(np.uint8)
-                return self
-        def sub(self, other):
+            self._map = np.clip(self._map.astype(np.int16) + other * 255, 0, 255).astype(np.uint8)
+            return self
+
+        def sub(self, other: 'Field' or float) -> 'Field':
+            """Subtract another Field or a scalar from this Field.
+
+            Parameters:
+                other (Field or float): Field or scalar value to subtract.
+
+            Returns:
+                Field: The updated Field object.
+            """
             if isinstance(other, Field):
                 return self.sub(other.get_map())
-            else:
-                self._map = self.add(other * -1)
-                return self
-        def mult(self, other):
+            self._map = self.add(other * -1)
+            return self
+
+        def mult(self, other: 'Field' or float) -> 'Field':
+            """Multiply this Field by another Field or scalar.
+
+            Parameters:
+                other (Field or float): Field or scalar multiplier.
+
+            Returns:
+                Field: The updated Field object.
+            """
             if isinstance(other, Field):
                 return self.mult(other.get_map())
-            else:
-                self._map = np.clip(self._map.astype(np.int16) * other, 0, 255).astype(np.uint8)
-                return self
-        def div(self, other):
+            self._map = np.clip(self._map.astype(np.int16) * other, 0, 255).astype(np.uint8)
+            return self
+
+        def div(self, other: 'Field' or float) -> 'Field':
+            """Divide this Field by another Field or scalar.
+
+            Parameters:
+                other (Field or float): Field or scalar divisor.
+
+            Returns:
+                Field: The updated Field object.
+            """
             if isinstance(other, Field):
                 return self.div(other.get_map())
-            else:
-                self._map = np.clip(self._map.astype(np.int16) / other, 0, 255).astype(np.uint8)
-                return self
+            self._map = np.clip(self._map.astype(np.int16) / other, 0, 255).astype(np.uint8)
+            return self
 
-        def __add__(self, other):
-            if isinstance(other, Field):
-                return self.__add__(other.get_map())
-            else:
-                clone = copy.deepcopy(self)
-                clone.add(other)
-                return clone
+        def __add__(self, other: 'Field' or float) -> 'Field':
+            """Return a new Field representing this + other.
 
-        def __sub__(self, other):
-            if isinstance(other, Field):
-                return self.__sub__(other.get_map())
-            else:
-                return self.__add__(other * -1)
+            Parameters:
+                other (Field or float): Field or scalar value to add.
 
-        def __mul__(self, other):
-            if isinstance(other, Field):
-                return self.__mul__(other.get_map())
-            else:
-                clone = copy.deepcopy(self)
-                clone.mult(other)
-                return clone
+            Returns:
+                Field: A new Field with the result.
+            """
+            clone = copy.deepcopy(self)
+            return clone.add(other)
 
-        def __truediv__(self, other):
-            if isinstance(other, Field):
-                return self.__truediv__(other.get_map())
-            else:
-                clone = copy.deepcopy(self)
-                clone.set_map(np.clip(self._map.astype(np.float16) / other, 0, 255).astype(np.uint8))
-                return clone
+        def __sub__(self, other: 'Field' or float) -> 'Field':
+            """Return a new Field representing this - other.
 
-        def invert(self):
+            Parameters:
+                other (Field or float): Field or scalar value to subtract.
+
+            Returns:
+                Field: A new Field with the result.
+            """
+            return self.__add__(other * -1)
+
+        def __mul__(self, other: 'Field' or float) -> 'Field':
+            """Return a new Field representing this * other.
+
+            Parameters:
+                other (Field or float): Field or scalar multiplier.
+
+            Returns:
+                Field: A new Field with the result.
+            """
+            clone = copy.deepcopy(self)
+            return clone.mult(other)
+
+        def __truediv__(self, other: 'Field' or float) -> 'Field':
+            """Return a new Field representing this / other.
+
+            Parameters:
+                other (Field or float): Field or scalar divisor.
+
+            Returns:
+                Field: A new Field with the result.
+            """
+            clone = copy.deepcopy(self)
+            clone.set_map(np.clip(self._map.astype(np.float16) / other, 0, 255).astype(np.uint8))
+            return clone
+
+        def invert(self) -> 'Field':
+            """Invert the field, flipping 0s to 255s and vice versa.
+
+            Returns:
+                Field: The updated Field object.
+            """
             self._map = 255 - self._map
             self.inverted = not self.inverted
             return self
 
+        def move(self, dx: int, dy: int) -> 'Field':
+            """Translate the field by (dx, dy) using an affine transform.
 
-        def move(self, dx: int, dy: int):
-            """
-            Moves the _map by (dx, dy) using an affine transformation.
-            Ensures the transformed image does not exceed OpenCV's limits.
+            Parameters:
+                dx (int): Horizontal shift (positive is right).
+                dy (int): Vertical shift (positive is down).
 
-            :param dx: Shift in x direction.
-            :param dy: Shift in y direction.
+            Returns:
+                Field: The updated Field object.
+
+            Raises:
+                ValueError: If the image exceeds OpenCV's size limits.
             """
             height, width = self._map.shape[:2]
 
-            # Ensure the resulting image does not exceed OpenCV limits
             if width >= 32000 or height >= 32000:
-                raise ValueError("Image too large to process in OpenCV warpAffine.")
+                raise ValueError("Image too large for OpenCV warpAffine.")
 
-            # Define translation matrix
             translation_matrix = np.float32([[1, 0, dx], [0, 1, dy]])
-
-            # Apply affine transformation
             self._map = cv2.warpAffine(
                 self._map, translation_matrix, (width, height),
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=255 if self.inverted else 0
             )
-
             return self
 
-        def resize(self, width_or_scale, height=None):
-            """
-            Resize the _map to the specified width and height or scale it by a factor.
+        def resize(self, width_or_scale: int or float, height: int = None) -> 'Field':
+            """Resize the field to specific dimensions or by a scale factor.
 
-            - If given a single number (int or float), it scales both width and height by that factor.
-            - If given two numbers, it resizes to those exact dimensions.
-            - If the new size is larger, fills new areas with 0s or 1s depending on `self.inverted`.
-            - If the new size is smaller, crops the current map.
+            Parameters:
+                width_or_scale (int or float): Target width or a scale factor.
+                height (int, optional): Target height (only if resizing by explicit dimensions).
 
-            :param width_or_scale: New width of the _map or a scale factor if height is not provided.
-            :param height: New height of the _map (optional if scaling).
+            Returns:
+                Field: The resized Field object.
             """
             if isinstance(width_or_scale, (int, float)) and height is None:
-                # Treat as a scale factor
                 scale = width_or_scale
                 width = int(self._map.shape[1] * scale)
                 height = int(self._map.shape[0] * scale)
             else:
-                # Treat as explicit width and height
                 width = int(width_or_scale)
                 height = int(height)
 
             fill_value = 255 if self.inverted else 0
 
             if width > self._map.shape[1] or height > self._map.shape[0]:
-                # Create a new map filled with the fill value
                 new_map = np.full((height, width), fill_value, dtype=np.uint8)
-                # Determine the overlap region
                 overlap_x_end = min(self._map.shape[1], width)
                 overlap_y_end = min(self._map.shape[0], height)
-                # Copy the old map into the new map
                 new_map[:overlap_y_end, :overlap_x_end] = self._map[:overlap_y_end, :overlap_x_end]
                 self._map = new_map
             else:
-                # Use OpenCV to resize the map directly if shrinking or reshaping
                 self._map = cv2.resize(self._map, (width, height), interpolation=cv2.INTER_AREA)
 
             return self
 
-        def scale(self, scale_x: float, scale_y: float = None):
-            """
-            Scale the _map and its contents by a given factor.
+        def scale(self, scale_x: float, scale_y: float = None) -> 'Field':
+            """Scale the field by a factor along the x and y axes.
 
-            - If only one factor is provided, scales both width and height equally.
-            - If two factors are provided, scales width and height separately.
-            - Resizes the map while preserving content.
-            - If scaling up, fills new areas with 0s or 1s depending on `self.inverted`.
+            Parameters:
+                scale_x (float): Scaling factor for width.
+                scale_y (float, optional): Scaling factor for height (defaults to scale_x if None).
 
-            :param scale_x: Scaling factor for width (or both axes if scale_y is None).
-            :param scale_y: Scaling factor for height (optional, defaults to scale_x).
+            Returns:
+                Field: The scaled Field object.
+
+            Raises:
+                ValueError: If any scale factor is non-positive.
             """
-            if not isinstance(scale_x, (int, float)) or scale_x <= 0:
-                raise ValueError("Scale factor must be a positive number.")
+            if scale_x <= 0 or (scale_y is not None and scale_y <= 0):
+                raise ValueError("Scale factors must be positive.")
 
             if scale_y is None:
-                scale_y = scale_x  # Use the same factor for both axes if only one is given
-            elif not isinstance(scale_y, (int, float)) or scale_y <= 0:
-                raise ValueError("Scale factor must be a positive number.")
+                scale_y = scale_x
 
-            # Compute new dimensions
             new_width = int(self._map.shape[1] * scale_x)
             new_height = int(self._map.shape[0] * scale_y)
-
-            # Resize the map using OpenCV while preserving content
             self._map = cv2.resize(self._map, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-
             return self
 
-        def fit(self):
+        def fit(self) -> 'Field':
+            """Stretch the region containing active values to fill the canvas.
+
+            Returns:
+                Field: The updated Field object.
             """
-            Stretches the region of interest (ROI) containing all the `255`s (or `0`s if inverted) to the edges of the canvas.
-            """
-            # Determine the target value based on whether the field is inverted
             target_value = 0 if self.inverted else 255
-
-            # Find the bounding box of the region containing the target value
             coords = cv2.findNonZero((self._map == target_value).astype(np.uint8))
+
             if coords is None:
-                return self  # If no target value exists, do nothing
+                return self
 
-            # Get the bounding box (x, y, width, height) of the region
             x, y, w, h = cv2.boundingRect(coords)
-
-            # Extract the region of interest (ROI)
             roi = self._map[y:y+h, x:x+w]
-
-            # Resize the ROI to fit the full canvas size
             resized_roi = cv2.resize(roi, (self._map.shape[1], self._map.shape[0]), interpolation=cv2.INTER_LINEAR)
 
-            # Fill the map with the resized ROI
             self._map = resized_roi
-
-            # Ensure binary values remain consistent after stretching
             if not self.inverted:
-                self._map[self._map != 255] = 0  # Enforce binary values: 255 for target, 0 otherwise
+                self._map[self._map != 255] = 0
             else:
-                self._map[self._map != 0] = 255  # Enforce binary values: 0 for target, 255 otherwise
+                self._map[self._map != 0] = 255
 
             return self
 
-        def preview(self, wait_for_exit: bool = False, title: str = "Field Preview"):
-            # Show the frame (optional)
+        def preview(self, wait_for_exit: bool = False, title: str = "Field Preview") -> None:
+            """Display the field using OpenCV.
+
+            Parameters:
+                wait_for_exit (bool): Whether to wait for a user key press before exiting.
+                title (str): Title of the display window.
+            """
             window_name = title
             cv2.imshow(window_name, self._map)
-            if (wait_for_exit):
-                # Keep checking if the window is closed
+            if wait_for_exit:
                 while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
-                    if cv2.waitKey(100) & 0xFF == ord('q'):  # Allow 'q' to close the window as well
+                    if cv2.waitKey(100) & 0xFF == ord('q'):
                         break
             else:
                 cv2.waitKey(1)
 
+        def get_map(self) -> np.ndarray:
+            """Get the normalized field map.
 
-        def get_map(self):
-            return (self._map.astype(np.float16) / 255)
+            Returns:
+                np.ndarray: The map normalized to [0, 1].
+            """
+            return self._map.astype(np.float16) / 255
 
-        def set_map(self, map: np.ndarray):
+        def set_map(self, map: np.ndarray) -> None:
+            """Set the internal map.
+
+            Parameters:
+                map (np.ndarray): New map data (must match expected shape).
+            """
             self._map = map
 
-        def blur(self, param: tuple = (5, 5)):
+        def blur(self, param: tuple = (5, 5)) -> 'Field':
+            """Apply a blur to the field.
+
+            Parameters:
+                param (tuple): Kernel size for blurring.
+
+            Returns:
+                Field: The blurred Field object.
+            """
             self._map = cv2.blur(self._map, param)
             return self
 
-        def mirror_x(self):
+        def mirror_x(self) -> 'Field':
+            """Mirror the field along the vertical (X) axis.
+
+            Returns:
+                Field: The mirrored Field object.
             """
-            Mirror the field along the x-axis (horizontal flip).
-            """
-            self._map = cv2.flip(self._map, 1)  # Flip around the vertical axis
+            self._map = cv2.flip(self._map, 1)
             return self
 
-        def mirror_y(self):
+        def mirror_y(self) -> 'Field':
+            """Mirror the field along the horizontal (Y) axis.
+
+            Returns:
+                Field: The mirrored Field object.
             """
-            Mirror the field along the y-axis (vertical flip).
-            """
-            self._map = cv2.flip(self._map, 0)  # Flip around the horizontal axis
+            self._map = cv2.flip(self._map, 0)
             return self
 
-        def crop(self, top_left: tuple, bottom_right: tuple):
-            """
-            Crops the field to a rectangle defined by the given coordinates.
+        def crop(self, top_left: tuple, bottom_right: tuple) -> 'Field':
+            """Crop the field to a rectangle defined by two points.
 
-            :param top_left: (x1, y1) - The top-left corner of the cropping area.
-            :param bottom_right: (x2, y2) - The bottom-right corner of the cropping area.
+            Parameters:
+                top_left (tuple): (x, y) coordinates for the top-left corner.
+                bottom_right (tuple): (x, y) coordinates for the bottom-right corner.
+
+            Returns:
+                Field: The cropped Field object.
             """
-            x1, y1 = map(int, top_left)  # Convert to integers
+            x1, y1 = map(int, top_left)
             x2, y2 = map(int, bottom_right)
 
-            # Ensure coordinates are within bounds
             x1, x2 = max(0, min(x1, self._map.shape[1])), max(0, min(x2, self._map.shape[1]))
             y1, y2 = max(0, min(y1, self._map.shape[0])), max(0, min(y2, self._map.shape[0]))
 
-            # Ensure x1, y1 are the top-left and x2, y2 are the bottom-right
             if x1 > x2:
                 x1, x2 = x2, x1
             if y1 > y2:
                 y1, y2 = y2, y1
 
-            # Crop the map
             self._map = self._map[y1:y2, x1:x2]
-
             return self
 
 
     class FOverlay(Field):
-        def __init__(self, opacity: int = 1.0):
-            super().__init__()
-            self._map = np.full((renderer.height(), renderer.width()), opacity*255, dtype=np.uint8)
+        def __init__(self, opacity: float = 1.0) -> None:
+            """Initialize an FOverlay object with a uniform opacity field.
 
-    """
-    class FPerlin(Field):
-        def __init__(self, seed: int = 0, scale: int = 100, octaves: int = 4, persistence: int = 0.2, lacunarity: int = 2.0, contrast: int = 0.0, midpoint=0.5):
-            super().__init__()
-
-            # Parameters
-            self.width, self.height = renderer.width(), renderer.height()
-            self.scale = scale
-            self.octaves = octaves
-            self.persistence = persistence
-            self.lacunarity = lacunarity
-            self.seed = seed
-            self.contrast = contrast
-            self.midpoint = midpoint
-
-
-            # Generate grid of coordinates
-            self.update()
-
-        def update(self):
-            x = np.linspace(0, self.width / self.scale, self.width)
-            y = np.linspace(0, self.height / self.scale, self.height)
-            x_coords, y_coords = np.meshgrid(x, y)
-
-
-            # Vectorized noise function
-            vectorized_pnoise2 = np.vectorize(lambda x, y: pnoise2(x, y, octaves=self.octaves, persistence=self.persistence, lacunarity=self.lacunarity, base=self.seed))
-
-            # Apply Perlin noise
-            self._map = (vectorized_pnoise2(x_coords, y_coords) + 1)/2
-            if (self.contrast != 0):
-                self._map = 1 / (1 + np.exp(-self.contrast * (self._map - self.midpoint)))
-            self._map *= 255
-    """
-    class FLine(Field):
-        def __init__(self, x1, y1, x2, y2, thickness):
-            super().__init__()
-            cv2.line(self._map,(int(x1), int(y1)), (int(x2), int(y2)), 255, int(thickness))
-
-    class FRect(Field):
-        def __init__(self, x1, y1, x2, y2, thickness = -1):
-            super().__init__()
-            cv2.rectangle(self._map,(int(x1), int(y1)), (int(x2), int(y2)), 255, int(thickness))
-
-    class FEllipse(Field):
-        def __init__(self, center, ellipse_width, ellipse_height, angle=0, thickness=-1):
-            """
-            Initialize an FEllipse object, automatically drawing the ellipse onto the map.
+            The overlay is initialized to a constant opacity across the entire canvas.
+            Opacity should be a value between 0 (fully transparent) and 1 (fully opaque).
 
             Parameters:
-            - width (int): Width of the field (canvas).
-            - height (int): Height of the field (canvas).
-            - center (tuple): The (x, y) center of the ellipse.
-            - ellipse_width (int): The total width of the ellipse (bounding box width).
-            - ellipse_height (int): The total height of the ellipse (bounding box height).
-            - angle (float): The rotation angle of the ellipse in degrees (default 0).
-            - thickness (int): Thickness of the ellipse border (-1 for filled ellipse, default).
+                opacity (float, optional): Initial opacity value for the overlay.
+                    Defaults to 1.0 (fully opaque).
+
+            Raises:
+                ValueError: If opacity is not within the range [0, 1].
             """
+            if not (0.0 <= opacity <= 1.0):
+                raise ValueError(f"Opacity must be between 0 and 1, but got {opacity}.")
+
+            super().__init__()
+            self._map = np.full(
+                (renderer.height(), renderer.width()),
+                int(opacity * 255),
+                dtype=np.uint8
+            )
+
+    class FLine(Field):
+        def __init__(self, x1: float, y1: float, x2: float, y2: float, thickness: float) -> None:
+            """Initialize an FLine object that draws a straight line on the field.
+
+            Creates a binary line between two points with a specified thickness.
+            The line is drawn onto the field's internal map immediately upon initialization.
+
+            Parameters:
+                x1 (float): X-coordinate of the start point.
+                y1 (float): Y-coordinate of the start point.
+                x2 (float): X-coordinate of the end point.
+                y2 (float): Y-coordinate of the end point.
+                thickness (float): Thickness of the line in pixels.
+
+            Raises:
+                ValueError: If thickness is not a positive number.
+            """
+            if thickness <= 0:
+                raise ValueError(f"Thickness must be a positive number, but got {thickness}.")
+
+            super().__init__()
+            cv2.line(
+                self._map,
+                (int(x1), int(y1)),
+                (int(x2), int(y2)),
+                color=255,
+                thickness=int(thickness)
+            )
+
+
+    class FRect(Field):
+        def __init__(self, x1: float, y1: float, x2: float, y2: float, thickness: int = -1) -> None:
+            """Initialize an FRect object that draws a rectangle on the field.
+
+            Creates a rectangle between two points, with customizable thickness.
+            By default, the rectangle is filled if thickness is set to -1.
+
+            Parameters:
+                x1 (float): X-coordinate of the top-left corner.
+                y1 (float): Y-coordinate of the top-left corner.
+                x2 (float): X-coordinate of the bottom-right corner.
+                y2 (float): Y-coordinate of the bottom-right corner.
+                thickness (int, optional): Thickness of the rectangle border.
+                    - Set to -1 to fill the rectangle. Defaults to -1.
+
+            Raises:
+                ValueError: If thickness is not -1 and is less than or equal to 0.
+            """
+            if thickness != -1 and thickness <= 0:
+                raise ValueError(f"Thickness must be a positive number or -1 to fill, but got {thickness}.")
+
+            super().__init__()
+            cv2.rectangle(
+                self._map,
+                (int(x1), int(y1)),
+                (int(x2), int(y2)),
+                color=255,
+                thickness=int(thickness)
+            )
+
+
+    class FEllipse(Field):
+        def __init__(
+                self,
+                center: tuple[float, float],
+                ellipse_width: float,
+                ellipse_height: float,
+                angle: float = 0,
+                thickness: int = -1
+        ) -> None:
+            """Initialize an FEllipse object that draws an ellipse on the field.
+
+            Creates an ellipse centered at a given point with specified width, height,
+            rotation angle, and border thickness. By default, the ellipse is filled
+            if thickness is set to -1.
+
+            Parameters:
+                center (tuple[float, float]): (x, y) coordinates for the center of the ellipse.
+                ellipse_width (float): Total width of the ellipse's bounding box.
+                ellipse_height (float): Total height of the ellipse's bounding box.
+                angle (float, optional): Rotation angle of the ellipse in degrees.
+                    Defaults to 0 (no rotation).
+                thickness (int, optional): Thickness of the ellipse border.
+                    - Set to -1 to fill the ellipse (default).
+
+            Raises:
+                ValueError: If thickness is not -1 and is less than or equal to 0.
+            """
+            if thickness != -1 and thickness <= 0:
+                raise ValueError(f"Thickness must be a positive number or -1 to fill, but got {thickness}.")
+
             super().__init__()
 
-            # Convert width and height to axes (semi-width and semi-height)
+            # Convert total width and height into semi-axes
             axes = (int(ellipse_width // 2), int(ellipse_height // 2))
 
-            # Draw the ellipse directly on the map
+            # Draw the ellipse onto the map
             cv2.ellipse(
                 self._map,
                 (int(center[0]), int(center[1])),
                 axes,
                 angle,
-                0, 360,  # Full ellipse
-                255,  # White ellipse
+                0, 360,  # Cover the full 360 degrees
+                255,     # White color
                 thickness
             )
 
+
     class FPoly(Field):
-        def __init__(self, points: np.ndarray):
-            super().__init__()
+        def __init__(self, points: np.ndarray) -> None:
+            """Initialize an FPoly object that draws a filled polygon on the field.
 
-            # Reshape the points for OpenCV (required shape: number_of_points x 1 x 2)
-            points = points.reshape((-1, 1, 2)).astype(np.int32)
-
-            # Draw the polygon outline
-            cv2.fillPoly(self._map, [points], color=255)
-
-    class FText(Field):
-        def __init__(self, text: str, position: tuple, font_scale: float, thickness: int = 1, custom_font=None):
-            """
-            Initialize an FText object, automatically drawing the text onto the map.
+            Takes a set of points and fills a polygon based on their coordinates.
+            The polygon will be drawn in white (value 255) onto the field map.
 
             Parameters:
-            - text (str): The text to render.
-            - position (tuple): The (x, y) position for the center of the text.
-            - font_scale (float): Scale of the text.
-            - thickness (int): Thickness of the text strokes for OpenCV font.
-            - custom_font (str or None): Path to a custom TTF font file. If None, uses OpenCV's default font.
+                points (np.ndarray): A NumPy array of shape (N, 2) containing (x, y) coordinates
+                    for the vertices of the polygon.
+
+                    - N must be at least 3 to form a valid polygon.
+                    - Points are automatically reshaped as required by OpenCV.
+
+            Raises:
+                ValueError: If fewer than 3 points are provided.
+            """
+            if points.shape[0] < 3:
+                raise ValueError(f"A polygon requires at least 3 points, but received {points.shape[0]}.")
+
+            super().__init__()
+
+            # Reshape points to (N, 1, 2) as expected by OpenCV
+            points = points.reshape((-1, 1, 2)).astype(np.int32)
+
+            # Fill the polygon on the map
+            cv2.fillPoly(self._map, [points], color=255)
+
+
+    class FText(Field):
+        def __init__(
+                self,
+                text: str,
+                position: tuple,
+                font_scale: float,
+                thickness: int = 1,
+                custom_font: str = None
+        ) -> None:
+            """Initialize an FText object that renders text onto the field map.
+
+            Allows rendering text either using a custom TrueType font (via Pillow) or using
+            OpenCV's built-in fonts. The text is automatically center-aligned based on the
+            provided position.
+
+            Parameters:
+                text (str): The text string to render.
+                position (tuple): A tuple (x, y) representing the center position for the text.
+                font_scale (float): Scale factor to size the text.
+                thickness (int, optional): Thickness of the text stroke (default is 1).
+                custom_font (str, optional): Path to a custom TTF font file.
+                    If None, OpenCV's default font is used.
+
+            Raises:
+                FileNotFoundError: If a custom font path is provided but the file cannot be found.
             """
             super().__init__()
 
             if custom_font:
-                # Use Pillow for custom fonts
                 self._draw_with_pillow(text, position, font_scale, custom_font)
             else:
-                # Fall back to OpenCV's putText
                 self._draw_with_opencv(text, position, font_scale, thickness)
 
-        def _draw_with_pillow(self, text, position, font_scale, custom_font):
-            """Draw the text using Pillow and a custom font."""
-            # Convert the Field map to a Pillow image
-            pil_image = Image.fromarray(self._map)
+        def _draw_with_pillow(
+                self,
+                text: str,
+                position: tuple,
+                font_scale: float,
+                custom_font: str
+        ) -> None:
+            """Render text using Pillow with a custom TrueType font.
 
-            # Create a drawing context
+            Converts the internal field map to a Pillow image, draws the text,
+            and converts it back to a NumPy array.
+
+            Parameters:
+                text (str): Text to render.
+                position (tuple): Center position (x, y) for the text.
+                font_scale (float): Scale factor for the font size.
+                custom_font (str): Path to a .ttf font file.
+            """
+            pil_image = Image.fromarray(self._map)
             draw = ImageDraw.Draw(pil_image)
 
-            # Load the custom font
-            font_size = int(font_scale * 20)  # Scale font size appropriately
-            font = ImageFont.truetype(custom_font, font_size)
+            try:
+                font_size = int(font_scale * 20)
+                font = ImageFont.truetype(custom_font, font_size)
+            except IOError:
+                raise FileNotFoundError(f"Custom font file '{custom_font}' not found or could not be opened.")
 
-            # Calculate text size and alignment using font.getbbox()
             text_bbox = font.getbbox(text)  # (left, top, right, bottom)
             text_width = text_bbox[2] - text_bbox[0]
             text_height = text_bbox[3] - text_bbox[1]
 
-            # Calculate the top-left corner position for center alignment
             bottom_left_x = int(position[0] - text_width / 2)
             bottom_left_y = int(position[1] - text_height / 2)
 
-            # Draw the text
             draw.text((bottom_left_x, bottom_left_y), text, font=font, fill=255)
-
-            # Convert the Pillow image back to a NumPy array
             self._map = np.array(pil_image)
 
-        def _draw_with_opencv(self, text, position, font_scale, thickness):
-            """Draw the text using OpenCV's putText."""
-            # Calculate the text size
-            (text_width, text_height), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, int(thickness))
+        def _draw_with_opencv(
+                self,
+                text: str,
+                position: tuple,
+                font_scale: float,
+                thickness: int
+        ) -> None:
+            """Render text using OpenCV's built-in font.
 
-            # Calculate the bottom-left corner position for center alignment
+            Parameters:
+                text (str): Text to render.
+                position (tuple): Center position (x, y) for the text.
+                font_scale (float): Scale factor for the font size.
+                thickness (int): Stroke thickness for the text.
+            """
+            (text_width, text_height), baseline = cv2.getTextSize(
+                text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+            )
+
             bottom_left_x = int(position[0] - text_width / 2)
             bottom_left_y = int(position[1] + text_height / 2)
 
-            # Draw the text centered on the map
             cv2.putText(
                 self._map,
                 text,
                 (bottom_left_x, bottom_left_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 font_scale,
-                255,  # White text
-                int(thickness),
+                255,
+                thickness,
                 lineType=cv2.LINE_AA
             )
 
 
 
+
     class FAudio(Field):
-        def __init__(self, aud: Frame_Audio, start: int = 0, end: int = None):
+        def __init__(self, aud: FrameAudio, start: int = 0, end: int = None) -> None:
+            """Initialize an FAudio object to visualize the audio frame data on the field map.
+
+            This class generates a visualization of the audio frame's magnitudes within the
+            specified frequency range. It creates bars corresponding to the frequencies and
+            displays a volume indicator based on the RMS volume of the frame.
+
+            Parameters:
+                aud (FrameAudio): The FrameAudio object containing the audio data (frequencies and magnitudes).
+                start (int, optional): The starting index of the frequency range to visualize (default is 0).
+                end (int, optional): The ending index of the frequency range to visualize. If None, uses the full range.
+
+            Raises:
+                ValueError: If the start or end indices are invalid.
+                Exception: If an error occurs during the visualization process.
+            """
             super().__init__()
+
             try:
                 freqs = aud.list_frequencies()
                 mags = aud.list_magnitudes()
 
-                # Handle start and end indices
+                # Handle start and end indices, adjust for the frequency bin width
                 if end is None:
                     end = len(freqs)
                 else:
-                    end = int(end / (aud.list_frequencies()[1]-aud.list_frequencies()[0]))
-                start = int(start / (aud.list_frequencies()[1]-aud.list_frequencies()[0]))
+                    end = int(end / (freqs[1] - freqs[0]))  # Convert to index
+
+                start = int(start / (freqs[1] - freqs[0]))  # Convert to index
 
                 if end > len(freqs):
                     end = len(freqs)
                 if start < 0 or start >= len(freqs):
-                    print(f"Invalid range: start={start}, end={end}")
-                    return
+                    raise ValueError(f"Invalid range: start={start}, end={end}")
 
+                # Normalize the magnitudes for visualization
                 norm = max(mags) / renderer.height()
                 if norm == 0 or np.isnan(norm) or np.isinf(norm):
                     print(f"Normalization error, mags={mags}")
                     return
 
-                # Create visualization
+                # Create the points for frequency bars
                 total_bars = end - start
                 bar_width = renderer.width() / total_bars
                 points = []
@@ -455,14 +656,11 @@ if len(_paths) != 0:
                     y = renderer.height() - mags[i] / norm
                     points.extend([x, y])
 
-                points.extend([
-                    renderer.width() - bar_width, renderer.height(),
-                    0, renderer.height()
-                ])
-
+                # Add the base of the visualization (polygon to close the bars)
+                points.extend([renderer.width() - bar_width, renderer.height(), 0, renderer.height()])
                 self.add(FPoly(np.array(points, dtype=np.float32)))
 
-                # Add volume indicator
+                # Add the volume indicator as a rectangle
                 self.add(FRect(
                     renderer.width() - bar_width,
                     renderer.height() - aud.get_volume() * renderer.height(),
@@ -470,5 +668,8 @@ if len(_paths) != 0:
                     renderer.height()
                 ))
 
+            except ValueError as ve:
+                print(f"Error in FAudio initialization: {ve}")
             except Exception as e:
-                print(f"Error initializing FAudio: {e}")
+                print(f"Unexpected error initializing FAudio: {e}")
+

@@ -1,6 +1,6 @@
 from neovere import *
 
-video = videos["render"]
+video = media["render"]
 
 renderer.set_resolution(video.width(), video.height())
 renderer.set_fps(video.fps())

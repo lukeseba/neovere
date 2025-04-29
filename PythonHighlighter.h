@@ -94,6 +94,9 @@ public:
         rule.format = stringFormat;
         highlightingRules.append(rule);
 
+        // Enums
+        enumFormat.setForeground(QColor(255, 140, 0)); // Custom dark orange
+
         // Comments
         QTextCharFormat commentFormat;
         commentFormat.setForeground(Qt::lightGray);
@@ -105,15 +108,22 @@ public:
         multiLineCommentFormat.setForeground(Qt::lightGray);
         multiLineCommentStart = QRegularExpression(R"(""")");
         multiLineCommentEnd = QRegularExpression(R"(""")");
-
-        // Enums
-        enumFormat.setForeground(QColor(255, 140, 0)); // Custom dark orange
     }
 
 protected:
     void highlightBlock(const QString &text) override {
         // Apply default format to the entire block
         setFormat(0, text.length(), defaultTextFormat);
+
+        // Highlight enums
+        QRegularExpression enumRegex("\\b\\w+\\.([a-zA-Z_][a-zA-Z_0-9]*)\\b(?!\\s*\\()"); // Avoid parentheses
+        QRegularExpressionMatchIterator enumMatchIterator = enumRegex.globalMatch(text);
+        while (enumMatchIterator.hasNext()) {
+            QRegularExpressionMatch enumMatch = enumMatchIterator.next();
+            int enumStart = enumMatch.capturedStart(1); // Position after the period
+            int enumLength = enumMatch.capturedLength(1); // Length of the part after the period
+            setFormat(enumStart, enumLength, enumFormat);
+        }
 
         // Highlight multi-line comments
         setCurrentBlockState(0);
@@ -160,16 +170,6 @@ protected:
             int nameStart = classMatch.capturedStart(1);
             int nameLength = classMatch.capturedLength(1);
             setFormat(nameStart, nameLength, classDefFormat);
-        }
-
-        // Highlight enums
-        QRegularExpression enumRegex("\\b\\w+\\.([a-zA-Z_][a-zA-Z_0-9]*)\\b(?!\\s*\\()"); // Avoid parentheses
-        QRegularExpressionMatchIterator enumMatchIterator = enumRegex.globalMatch(text);
-        while (enumMatchIterator.hasNext()) {
-            QRegularExpressionMatch enumMatch = enumMatchIterator.next();
-            int enumStart = enumMatch.capturedStart(1); // Position after the period
-            int enumLength = enumMatch.capturedLength(1); // Length of the part after the period
-            setFormat(enumStart, enumLength, enumFormat);
         }
     }
 
