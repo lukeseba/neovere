@@ -33,6 +33,7 @@ api_key = ""
 
 audio_counter = 0
 
+
 from typing import Union
 from typing import Optional
 
@@ -1137,6 +1138,7 @@ class Bot:
             else:
                 i += 1
         return timestamps
+
 def read_font_from_qt_resource(resource_path):
     file = QFile(resource_path)
     if not file.open(QFile.ReadOnly):
@@ -1165,6 +1167,7 @@ def generate_random_filename(length: int = 10, seed: int = None) -> str:
 def set_openai_key(key: str):
     global api_key
     api_key = key
+
 
 media = {}
 renderer = NonlinearRenderer(640, 480, 24)
@@ -1197,6 +1200,7 @@ if _paths:  # Ensure _paths is not empty
                 current_media.preload_data()
             except:
                 print("Failed to preload audio data for " + media_name)
+
 
 if len(_paths) != 0:
     class Field:
@@ -1874,6 +1878,15 @@ if len(_paths) != 0:
                 print(f"Unexpected error initializing FAudio: {e}")
 
 
+
+class FCustom(Field):
+    def __init__(self) -> None:
+        """Initialize a custom field.
+        """
+        super().__init__()
+
+        self._map = # initialize map for custom field
+
 if len(_paths) != 0:
     class Filter:
         """A filter that aligns a Field object with the current renderer dimensions."""
@@ -2112,6 +2125,33 @@ if len(_paths) != 0:
             """
             self.frame = Frame(cv2.flip(self.frame.get_pixels(), 0))
             return self
+
+
+
+class Custom_Filter(Filter):
+    """A filter that overlays a solid color onto a Field-based mask."""
+
+    def __init__(self, field: Optional[Field] = None) -> None:
+        """Initialize a Solid_Color filter.
+
+        Parameters:
+
+            field (Optional[Field]): Field object providing the overlay mask.
+                If None, a default FOverlay() field will be used.
+        """
+        super().__init__(field)
+
+    def apply(self, pixels: np.ndarray) -> np.ndarray:
+        """Apply the solid color filter to pixel data using the field mask.
+
+        Parameters:
+            pixels (np.ndarray): The pixel data to apply the filter to.
+
+        Returns:
+            np.ndarray: The modified pixel data.
+        """
+        pixels = # modify given pixels to apply filter.
+        return pixels * self._map # apply field (self._map) to mask the filter
 
 
 

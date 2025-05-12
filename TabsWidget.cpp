@@ -20,7 +20,7 @@ TabsWidget::TabsWidget(bool includeLabel, bool buttonStyleTabs, QWidget *parent)
         nameLabel = new QLineEdit(mainWidget);
         nameLabel->setAlignment(Qt::AlignCenter);
         nameLabel->setReadOnly(true);
-        nameLabel->setStyleSheet("QLineEdit{ background-color: white;  color: black; border: 0px;}"
+        nameLabel->setStyleSheet("QLineEdit{ background-color: none;  color: black; border: 0px;}"
                                             );
     }
 
@@ -66,7 +66,7 @@ void TabsWidget::addTab(const QString &tabName, const QString data, bool closeab
 
     // Set the default style for the tab
     tab->button()->setStyleSheet(
-        "background-color: none; border: 1px solid lightgray; border-radius: 1px; padding: 5px 5px;"
+        "background-color: white; border: 1px solid lightgray; border-radius: 1px; padding: 5px 5px;"
     );
 
     // Connect signals for the tab button
@@ -141,7 +141,7 @@ void TabsWidget::deselectCurrentTab()
 
         // Reset the tab style to default
         currentTab->button()->setStyleSheet(
-            "background-color: none; border: 1px solid lightgray; border-radius: 1px; padding: 5px 5px;"
+            "background-color: white; border: 1px solid lightgray; border-radius: 1px; padding: 5px 5px;"
         );
 
         // Deselect the tab
@@ -160,6 +160,30 @@ void TabsWidget::handleTabClicked(int index)
     selectTab(index);
 }
 
+// Add this new method implementation
+void TabsWidget::setColor(const QColor &color) {
+    highlightColor = color;
+
+    // Update the style of the currently selected tab if there is one
+    if (selectedTabIndex >= 0 && selectedTabIndex < tabs.size()) {
+        updateSelectedTabStyle();
+    }
+}
+
+// Add this helper method
+void TabsWidget::updateSelectedTabStyle() {
+    if (selectedTabIndex >= 0 && selectedTabIndex < tabs.size()) {
+        TabButton *currentTab = tabs[selectedTabIndex];
+        currentTab->button()->setStyleSheet(
+            QString("background-color: rgb(%1, %2, %3); border: 1px solid lightgray; border-radius: 3px; padding: 5px 5px;")
+                .arg(highlightColor.red())
+                .arg(highlightColor.green())
+                .arg(highlightColor.blue())
+        );
+    }
+}
+
+// Modify the selectTab method to use the helper
 void TabsWidget::selectTab(int index) {
     // Deselect the currently selected tab
     deselectCurrentTab();
@@ -168,14 +192,12 @@ void TabsWidget::selectTab(int index) {
     selectedTabIndex = index;
     TabButton *newTab = tabs[selectedTabIndex];
 
-    // Highlight the tab with light blue
-    newTab->button()->setStyleSheet(
-        "background-color: rgb(200, 230, 255); border: 1px solid gray; border-radius: 3px; padding: 5px 5px;"
-    );
+    // Update the style using the current highlight color
+    updateSelectedTabStyle();
 
-    newTab->button()->setChecked(true);      // Mark the tab as selected
+    newTab->button()->setChecked(true);
     if (newTab->closeable) {
-        newTab->closeButton()->setVisible(true); // Show the "x" button
+        newTab->closeButton()->setVisible(true);
     }
 
     if (hasLabel) {

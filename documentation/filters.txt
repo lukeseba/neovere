@@ -1,4 +1,4 @@
-class Filter:
+* class Filter:
 #    A filter that aligns a Field object with the current renderer dimensions.
 
     __init__(field: Optional[Field] = None) -> None:
@@ -19,7 +19,7 @@ class Filter:
 #        Filter: The Filter instance itself (for method chaining).
 #
 
-class Solid_Color(Filter):
+* class Solid_Color(Filter):
 #    A filter that overlays a solid color onto a Field-based mask.
 
     __init__(r: int, g: int, b: int, field: Optional[Field] = None) -> None:
@@ -50,7 +50,7 @@ class Solid_Color(Filter):
 #        np.ndarray: The color-modified pixel data.
 #
 
-class Invert(Filter):
+* class Invert(Filter):
 #    A filter that inverts the colors of a Field-based mask.
 
     __init__(field: Optional[Field] = None) -> None:
@@ -73,7 +73,7 @@ class Invert(Filter):
 #        np.ndarray: The color-inverted and blended pixel data, clipped to the valid range [0, 255].
 #
 
-class Draw_Frame(Filter):
+* class Draw_Frame(Filter):
 #    A filter that draws a frame onto an image at a specified position.
 
     __init__(frame: Frame, x: Optional[int] = None, y: Optional[int] = None, field: Optional[Field] = None) -> None:
@@ -131,3 +131,24 @@ class Draw_Frame(Filter):
 #        Draw_Frame: The current instance with the frame mirrored along the y-axis.
 #
 
+class Custom_Filter(Filter):
+#A filter that overlays a solid color onto a Field-based mask.
+
+    __init__(field: Optional[Field] = None) -> None:
+#    Initialize a Solid_Color filter.
+#
+#    Parameters:
+#
+#    field (Optional[Field]): Field object providing the overlay mask.
+#    If None, a default FOverlay() field will be used.
+#
+
+    apply(pixels: np.ndarray) -> np.ndarray:
+#    Apply the solid color filter to pixel data using the field mask.
+#
+#    Parameters:
+#        pixels (np.ndarray): The pixel data to apply the filter to.
+#
+#    Returns:
+#        np.ndarray: The modified pixel data.
+#

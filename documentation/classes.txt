@@ -1,4 +1,4 @@
-class FrameAudio:
+* class FrameAudio:
 
     __init__(audio_data: dict) -> None:
 #    Initialize a FrameAudio object with per-frame audio data.
@@ -45,7 +45,7 @@ class FrameAudio:
 #        np.ndarray: Array of magnitudes.
 #
 
-class Frame:
+* class Frame:
 #A class to represent and manipulate a single frame of pixel data.
 
     __init__(pixels: np.ndarray) -> None:
@@ -133,7 +133,7 @@ class Frame:
 #        y2 (int): Bottom (ending) y-coordinate.
 #
 
-class Color_Frame(Frame):
+* class Color_Frame(Frame):
 #A class to represent and manipulate a frame composed of a single RGB color
 
     __init__(width: int, height: int, color: tuple = (0, 0, 0)):
@@ -159,7 +159,7 @@ class Color_Frame(Frame):
 #        ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
 #
 
-class Video:
+* class Video:
 #A class to represent and manipulate a video file, including reading frames and extracting audio.
 
     __init__(video_path: str) -> None:
@@ -258,7 +258,7 @@ class Video:
 #        FrameAudio: The corresponding audio frame for the specified video frame.
 #
 
-class Audio:
+* class Audio:
 
     __init__(file_path: str) -> None:
 #    Initialize an Audio object with a given file path.
@@ -318,7 +318,7 @@ class Audio:
 #        str: File path.
 #
 
-class NonlinearRenderer:
+* class NonlinearRenderer:
 
     __init__(width: int, height: int, fps: int) -> None:
 #    Initialize a NonlinearRenderer for rendering video frames non-sequentially.
@@ -410,7 +410,7 @@ class NonlinearRenderer:
 #        ValueError: If frames cannot be read during rendering.
 #
 
-class Bot:
+* class Bot:
 #Chatbot that can generate text responses, synthesize speech, and transcribe audio.
 
     __init__(personality: str = "You are a helpful chatbot.", unique_key: Optional[str] = None, voice: str = "onyx") -> None:

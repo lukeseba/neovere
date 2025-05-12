@@ -44,6 +44,14 @@ VideoSlider::VideoSlider(QMediaPlayer *player, int sliderSize, QWidget *parent) 
     setMouseTracking(true); // Enable hover detection
 }
 
+// Add the new method implementation
+void VideoSlider::setColor(const QColor &filledColor, const QColor &backgroundBaseColor) {
+    this->filledColor = filledColor;
+    this->backgroundBaseColor = backgroundBaseColor;
+    update(); // Trigger repaint with new colors
+}
+
+// Modify the paintEvent to use the color variables
 void VideoSlider::paintEvent(QPaintEvent *event) {
     Q_UNUSED(event);
 
@@ -51,20 +59,20 @@ void VideoSlider::paintEvent(QPaintEvent *event) {
     QStyleOptionSlider opt;
     initStyleOption(&opt);
 
-    // Background: rounded rectangle with bluish-purplish grey
-    QRect trackRect = rect().adjusted(5, 0, -5, 0); // Adjusted to make the slider taller
+    // Background: rounded rectangle with customizable color
+    QRect trackRect = rect().adjusted(5, 0, -5, 0);
     painter.setRenderHint(QPainter::Antialiasing);
-    QColor background = underMouse() ? QColor(140, 150, 170) : QColor(120, 130, 150); // Highlight on hover
+    QColor background = underMouse() ? backgroundBaseColor.lighter(110) : backgroundBaseColor;
     int playheadWidth = underMouse() ? 8 : 4;
-    painter.setBrush(background); // Bluish-purplish grey (darker when hovered)
+    painter.setBrush(background);
     painter.setPen(Qt::NoPen);
     painter.drawRoundedRect(trackRect, 2, 2);
 
-    // Filled area to the left of the playhead: pastel muted purple
+    // Filled area to the left of the playhead with customizable color
     QRect filledRect = QRect(trackRect.left(), trackRect.top(),
-                              (value() - minimum()) * trackRect.width() / (maximum() - minimum()),
-                              trackRect.height());
-    painter.setBrush(QColor(185, 205, 230)); // Pastel muted blue
+                            (value() - minimum()) * trackRect.width() / (maximum() - minimum()),
+                            trackRect.height());
+    painter.setBrush(filledColor);
     painter.drawRoundedRect(filledRect, 2, 2);
 
     // Playhead: white line with a hint of blue
@@ -72,7 +80,7 @@ void VideoSlider::paintEvent(QPaintEvent *event) {
                     (value() - minimum()) * trackRect.width() / (maximum() - minimum());
     QRect playheadRect(playheadX - 2 - playheadWidth/2, trackRect.top(), playheadWidth, trackRect.height());
     painter.setPen(Qt::gray);
-    painter.setBrush(QColor(250, 250, 255)); // White with a hint of pink
+    painter.setBrush(QColor(250, 250, 255));
     painter.drawRect(playheadRect);
 }
 

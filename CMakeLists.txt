@@ -34,6 +34,9 @@ set(SOURCES main.cpp MaintainFrame.cpp MaintainFrame.h
         TabsWidget.h
         TabButton.cpp
         TabButton.h
+        SearchTextEdit.cpp
+        SearchTextEdit.h
+        ButtonTextEdit.h
 )
 qt_add_resources(SOURCES resources.qrc)
 

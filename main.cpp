@@ -37,13 +37,39 @@
 #include "VideoSlider.h"
 #include <QTemporaryFile>
 
+#include "ButtonTextEdit.h"
 #include "PythonHighlighter.h"
 #include "PythonCodeEditor.h"
+#include "SearchTextEdit.h"
 
 #include "TabsWidget.h"
 
 QProcess* process = nullptr;
 
+// convert a plural string to a singular string
+QString pluralToSingular(const QString& pluralWord) {
+    if (pluralWord.isEmpty()) {
+        return pluralWord;
+    }
+
+    // Check for "es" ending first (longer suffix takes precedence)
+    if (pluralWord.endsWith("es") && pluralWord.length() > 2) {
+        // Special case for words ending with "ies" -> "y"
+        if (pluralWord.endsWith("ies") && pluralWord.length() > 3) {
+            QString singular = pluralWord.left(pluralWord.length() - 3);
+            return singular + "y";
+        }
+        // Remove "es" for other cases
+        return pluralWord.left(pluralWord.length() - 2);
+    }
+    // Check for simple "s" ending
+    else if (pluralWord.endsWith("s") && pluralWord.length() > 1) {
+        return pluralWord.left(pluralWord.length() - 1);
+    }
+
+    // Return original if no plural suffix found
+    return pluralWord;
+}
 
 // Function to load a custom font and return a QFont object
 QFont setFont(const QString &fontPath, int fontSize = 12) {
@@ -93,7 +119,7 @@ void listResourceFiles(const QString &path = ":/") {
     }
 }
 
-bool openProjectFromFile(QStringList* programs, QStringList* mediaPaths,  QPlainTextEdit *outputText) {
+QString openProjectFromFile(QStringList* programs, QStringList* mediaPaths,  QPlainTextEdit *outputText) {
     QString fileName = QFileDialog::getOpenFileName(nullptr, "Open File", "", "NEOVERE Files (*.nv);;All Files (*)");
     if (!fileName.isEmpty()) {
         QFile file(fileName);
@@ -102,7 +128,7 @@ bool openProjectFromFile(QStringList* programs, QStringList* mediaPaths,  QPlain
         // Open the file for reading
         if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
             outputText->setPlainText("Failed to open the file.");
-            return false;
+            return "";
         }
         // read file contents
         QTextStream in(&file);
@@ -125,25 +151,28 @@ bool openProjectFromFile(QStringList* programs, QStringList* mediaPaths,  QPlain
             }
         }
     } else {
-        return false;
+        return "";
     }
-    return true;
+    return fileName;
 }
 
-void saveProjectToFile(QString programs[], QStringList mediaPaths,  QPlainTextEdit *outputText) {
+QString saveProjectToFile(QString programs[], QStringList mediaPaths, QPlainTextEdit *outputText, QString saveName = "") {
     // Get the file name and location from the user
-    QString fileName = QFileDialog::getSaveFileName(
+    QString fileName = saveName;
+    if (fileName.isEmpty()) {
+        fileName = QFileDialog::getSaveFileName(
         nullptr, "Save File", "nullnomen.nv", "NEOVERE Files (*.nv);;All Files (*)");
 
-    if (fileName.isEmpty()) {
-        return; // User canceled the dialog
+        if (fileName.isEmpty()) {
+            return ""; // User canceled the dialog
+        }
     }
 
     // Open the file for writing
     QFile file(fileName);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         outputText->setPlainText("Error. Cannot save file: " + file.errorString());
-        return;
+        return "";
     }
 
     // Write the text from the QTextEdit to the file
@@ -161,24 +190,47 @@ void saveProjectToFile(QString programs[], QStringList mediaPaths,  QPlainTextEd
     }
     file.close();
 
-    outputText->setPlainText("File "+ fileName +" saved successfully");
+    outputText->appendPlainText("File "+ fileName +" saved successfully");
+
+    return fileName;
 }
 
 QString combinePythonFiles(const QStringList &fileNames) {
     QString combinedCode;
+    QDir resourcesDir(":/resources/code/");
+    QDir classesDir("classes/");
 
     for (const QString &fileName : fileNames) {
+        // First add the main file
         QString filePath = ":/resources/code/" + fileName + ".py";
-
         QFile file(filePath);
-        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            qDebug() << "Failed to open file:" << filePath;
-            continue; // Skip this file, but try others
-        }
 
-        QTextStream in(&file);
-        combinedCode += in.readAll() + "\n"; // Add file content to combined code
-        file.close();
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            combinedCode += in.readAll() + "\n\n";
+            file.close();
+        } else {
+            qDebug() << "Failed to open file:" << filePath;
+        }
+        // Check if there's a matching directory in classes/
+        QString dirPath = "classes/" + fileName;
+        if (classesDir.exists(fileName)) {
+            QDir subDir(dirPath);
+            QStringList pyFiles = subDir.entryList(QStringList() << "*.py", QDir::Files);
+
+            for (const QString &pyFile : pyFiles) {
+                QString subFilePath = dirPath + "/" + pyFile;
+                QFile subFile(subFilePath);
+
+                if (subFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                    QTextStream subIn(&subFile);
+                    combinedCode += subIn.readAll() + "\n\n";
+                    subFile.close();
+                } else {
+                    qDebug() << "Failed to open sub-file:" << subFilePath;
+                }
+            }
+        }
     }
 
     return combinedCode;
@@ -329,176 +381,350 @@ void removeImportedTabs(TabsWidget *mediaHeader) {
     }
 }
 
-void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText, TabsWidget * mediaHeader) {
-    QFile defaultFile(":/resources/code/default_project.py");
+QString readFromFile(QString fileName) {
+    QFile defaultFile(fileName);
     defaultFile.open(QIODevice::ReadOnly);
-    codePanel->setPlainText(defaultFile.readAll());
+    QString contents = defaultFile.readAll();
     defaultFile.close();
+    return contents;
+}
+
+void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText, TabsWidget * mediaHeader) {
+    codePanel->setPlainText(readFromFile(":/resources/code/default_project.py"));
     removeImportedTabs(mediaHeader);
     outputText->appendPlainText("New file created");
 }
 
+// Example function to process individual Python files
+void processPythonFile(const QString &filePath) {
+    QFile file(filePath);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream in(&file);
+        QString content = in.readAll();
+        file.close();
 
-QString documentPython(const QString& path) {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return "Error: Could not open file at " + path;
+        // Do something with the file content
+        // For example, extract class names, analyze code, etc.
+    } else {
+        qWarning() << "Could not open file:" << filePath;
+    }
+}
+
+void processPythonFilesFlat(QString path) {
+    QDir classesDir(path);
+    classesDir.setNameFilters(QStringList() << "*.py");
+    classesDir.setFilter(QDir::Files);
+
+    QStringList pythonFiles = classesDir.entryList();
+
+    for (const QString &fileName : pythonFiles) {
+        QString filePath = classesDir.absoluteFilePath(fileName);
+        qDebug() << "Found Python file:" << filePath;
+        processPythonFile(filePath);
+    }
+}
+
+QString documentPython(QString docName) {
+    QStringList paths = QStringList();
+    paths.append(":/resources/code/" + docName + ".py");
+    // add file paths for custom classes
+    QDir classesDir("classes/"+docName);
+    classesDir.setNameFilters(QStringList() << "*.py");
+    classesDir.setFilter(QDir::Files);
+
+    QStringList pythonFiles = classesDir.entryList();
+
+    for (const QString &fileName : pythonFiles) {
+        QString filePath = classesDir.absoluteFilePath(fileName);
+        paths.append(filePath);
     }
 
-    QTextStream in(&file);
-    QString documented;
-    bool insideDefinition = false;
-    bool expectDocstring = false;
-    int headerIndent = 0;
-    bool insideParametersOrReturns = false;
+    QString totalDocument = "";
 
-    while (!in.atEnd()) {
-        QString line = in.readLine();
-        QString trimmed = line.trimmed();
+    for (int i = 0; i < paths.length(); i++) {
+        QFile file(paths.at(i));
 
-        // Detect class
-        QRegularExpression classRegex("^\\s*class\\s+(\\w+)\\s*(\\([^)]*\\))?");
-        QRegularExpressionMatch classMatch = classRegex.match(line);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return "Error: Could not open file at " + paths.at(i);
+        }
+        QTextStream in(&file);
+        QString documented;
+        bool insideDefinition = false;
+        bool expectDocstring = false;
+        int headerIndent = 0;
+        bool insideParametersOrReturns = false;
 
-        // Detect method with parameters and optional return type
-        QRegularExpression methodRegex("^\\s*def\\s+(\\w+)\\s*(\\(.*\\))\\s*(->\\s*[^:]*)?:");
-        QRegularExpressionMatch methodMatch = methodRegex.match(line);
+        while (!in.atEnd()) {
+            QString line = in.readLine();
+            QString trimmed = line.trimmed();
 
-        if (classMatch.hasMatch()) {
-            QString className = classMatch.captured(1);
-            QString baseClasses = classMatch.captured(2);
-            if (baseClasses.isNull()) {
-                baseClasses = "";
+            // Detect class
+            QRegularExpression classRegex("^\\s*class\\s+(\\w+)\\s*(\\([^)]*\\))?");
+            QRegularExpressionMatch classMatch = classRegex.match(line);
+
+            // Detect method with parameters and optional return type
+            QRegularExpression methodRegex("^\\s*def\\s+(\\w+)\\s*(\\(.*\\))\\s*(->\\s*[^:]*)?:");
+            QRegularExpressionMatch methodMatch = methodRegex.match(line);
+
+            if (classMatch.hasMatch()) {
+                QString className = classMatch.captured(1);
+                QString baseClasses = classMatch.captured(2);
+                if (baseClasses.isNull()) {
+                    baseClasses = "";
+                }
+
+                // Only document public classes (those that don't start with '_')
+                if (!className.startsWith("_")) {
+                    if (insideDefinition) {
+                        documented += "\n";
+                    }
+
+                    int indent = line.indexOf(QRegularExpression("\\S")); // Find the first non-whitespace character
+                    documented += QString(0, ' ');
+                    if (i == 0) {
+                        documented += "* ";
+                    }
+                    documented += "class " + className + baseClasses + ":\n";
+                    insideDefinition = true;
+                    expectDocstring = true;
+                    headerIndent = indent;
+                }
+                continue;
             }
 
-            // Only document public classes (those that don't start with '_')
-            if (!className.startsWith("_")) {
+            if (methodMatch.hasMatch()) {
+                QString methodName = methodMatch.captured(1);
+                // Skip private methods or methods starting with a single '_', but not '__init__'
+                if (methodName.startsWith("_") && !methodName.startsWith("__init__")) {
+                    continue;  // Skip this method entirely
+                }
+
+                QString parameters = methodMatch.captured(2);
+                QString returnType = methodMatch.captured(3);
+
+                // Always indent function signatures by 4 spaces
+                int indent = 4;
+
+                // Clean parameters: remove "self" if present
+                parameters = parameters.trimmed();
+                if (parameters.startsWith("(") && parameters.endsWith(")")) {
+                    QString innerParams = parameters.mid(1, parameters.length() - 2).trimmed();
+                    QStringList paramList = innerParams.split(",", Qt::SkipEmptyParts);
+
+                    // Remove 'self' from param list
+                    QStringList cleanedParams;
+                    for (QString param : paramList) {
+                        param = param.trimmed();
+                        if (param != "self") {
+                            cleanedParams.append(param);
+                        }
+                    }
+
+                    parameters = "(" + cleanedParams.join(", ") + ")";
+                }
+
+                QString signature = methodName + parameters;
+                if (!returnType.isEmpty()) {
+                    signature += " " + returnType.trimmed();
+                }
+                signature += ":";
+
                 if (insideDefinition) {
                     documented += "\n";
                 }
 
-                int indent = line.indexOf(QRegularExpression("\\S")); // Find the first non-whitespace character
-                documented += QString(0, ' ') + "class " + className + baseClasses + ":\n";
+                // Add 4 spaces of indentation for method definitions
+                documented += QString(indent, ' ') + signature + "\n";
+
                 insideDefinition = true;
                 expectDocstring = true;
                 headerIndent = indent;
-            }
-            continue;
-        }
-
-        if (methodMatch.hasMatch()) {
-            QString methodName = methodMatch.captured(1);
-            // Skip private methods or methods starting with a single '_', but not '__init__'
-            if (methodName.startsWith("_") && !methodName.startsWith("__init__")) {
-                continue;  // Skip this method entirely
+                continue;
             }
 
-            QString parameters = methodMatch.captured(2);
-            QString returnType = methodMatch.captured(3);
+            if (expectDocstring && trimmed.startsWith("\"\"\"")) {
+                QStringList docLines;
 
-            // Always indent function signatures by 4 spaces
-            int indent = 4;
+                QString temp = trimmed.mid(3);
 
-            // Clean parameters: remove "self" if present
-            parameters = parameters.trimmed();
-            if (parameters.startsWith("(") && parameters.endsWith(")")) {
-                QString innerParams = parameters.mid(1, parameters.length() - 2).trimmed();
-                QStringList paramList = innerParams.split(",", Qt::SkipEmptyParts);
-
-                // Remove 'self' from param list
-                QStringList cleanedParams;
-                for (QString param : paramList) {
-                    param = param.trimmed();
-                    if (param != "self") {
-                        cleanedParams.append(param);
+                if (temp.endsWith("\"\"\"")) {
+                    temp.chop(3);
+                    docLines << temp.trimmed();
+                } else {
+                    docLines << temp.trimmed();
+                    while (!in.atEnd()) {
+                        QString nextLine = in.readLine();
+                        QString nextTrimmed = nextLine.trimmed();
+                        if (nextTrimmed.endsWith("\"\"\"")) {
+                            docLines << nextTrimmed.left(nextTrimmed.length() - 3).trimmed();
+                            break;
+                        } else {
+                            docLines << nextTrimmed;
+                        }
                     }
                 }
 
-                parameters = "(" + cleanedParams.join(", ") + ")";
-            }
+                // Process docstring
+                for (const QString& docLine : docLines) {
+                    if (docLine.isEmpty()) {
+                        documented += "#\n"; // Empty line
+                        insideParametersOrReturns = false;
+                        continue;
+                    }
 
-            QString signature = methodName + parameters;
-            if (!returnType.isEmpty()) {
-                signature += " " + returnType.trimmed();
+                    QString lowered = docLine.toLower();
+                    if (lowered.startsWith("parameters:") ||
+                        lowered.startsWith("returns:") ||
+                        lowered.startsWith("raises:")) {
+                        documented += "#" + QString(headerIndent, ' ') + docLine + "\n";
+                        insideParametersOrReturns = true;
+                        continue;
+                    }
+
+                    if (insideParametersOrReturns) {
+                        documented += "#" + QString(headerIndent + 4, ' ') + docLine + "\n";
+                    } else {
+                        documented += "#" + QString(headerIndent, ' ') + docLine + "\n";
+                    }
+                }
+
+                expectDocstring = false;
+                continue;
             }
-            signature += ":";
 
             if (insideDefinition) {
-                documented += "\n";
+                if (trimmed.isEmpty()) {
+                    documented += "\n";
+                    insideDefinition = false;
+                }
+                continue;
             }
-
-            // Add 4 spaces of indentation for method definitions
-            documented += QString(indent, ' ') + signature + "\n";
-
-            insideDefinition = true;
-            expectDocstring = true;
-            headerIndent = indent;
-            continue;
         }
+        totalDocument += documented;
+    }
 
-        if (expectDocstring && trimmed.startsWith("\"\"\"")) {
-            QStringList docLines;
+    return totalDocument;
+}
 
-            QString temp = trimmed.mid(3);
+bool saveClass(const QString &category, const QString &content, QWidget *parent = nullptr) {
+    // Extract class name from content
+    QRegularExpression classRegex("class\\s+(\\w+)");
+    QRegularExpressionMatch match = classRegex.match(content);
 
-            if (temp.endsWith("\"\"\"")) {
-                temp.chop(3);
-                docLines << temp.trimmed();
-            } else {
-                docLines << temp.trimmed();
-                while (!in.atEnd()) {
-                    QString nextLine = in.readLine();
-                    QString nextTrimmed = nextLine.trimmed();
-                    if (nextTrimmed.endsWith("\"\"\"")) {
-                        docLines << nextTrimmed.left(nextTrimmed.length() - 3).trimmed();
-                        break;
-                    } else {
-                        docLines << nextTrimmed;
-                    }
-                }
-            }
+    if (!match.hasMatch()) {
+        QMessageBox::warning(parent,
+                           "Class Not Found",
+                           "No class definition found in the provided content.\n"
+                           "Please ensure your content contains a Python class definition.");
+        return false;
+    }
 
-            // Process docstring
-            for (const QString& docLine : docLines) {
-                if (docLine.isEmpty()) {
-                    documented += "#\n"; // Empty line
-                    insideParametersOrReturns = false;
-                    continue;
-                }
+    QString className = match.captured(1);
 
-                QString lowered = docLine.toLower();
-                if (lowered.startsWith("parameters:") ||
-                    lowered.startsWith("returns:") ||
-                    lowered.startsWith("raises:")) {
-                    documented += "#" + QString(headerIndent, ' ') + docLine + "\n";
-                    insideParametersOrReturns = true;
-                    continue;
-                }
-
-                if (insideParametersOrReturns) {
-                    documented += "#" + QString(headerIndent + 4, ' ') + docLine + "\n";
-                } else {
-                    documented += "#" + QString(headerIndent, ' ') + docLine + "\n";
-                }
-            }
-
-            expectDocstring = false;
-            continue;
-        }
-
-        if (insideDefinition) {
-            if (trimmed.isEmpty()) {
-                documented += "\n";
-                insideDefinition = false;
-            }
-            continue;
+    // Create directory structure if it doesn't exist
+    QDir dir;
+    QString path = QString("classes/%1").arg(category);
+    if (!dir.exists(path)) {
+        if (!dir.mkpath(path)) {
+            QMessageBox::critical(parent,
+                                "Directory Creation Failed",
+                                QString("Failed to create directory: %1").arg(path));
+            return false;
         }
     }
 
-    return documented;
+    // Create and write to file
+    QString filePath = QString("%1/%2.py").arg(path).arg(className);
+    QFile file(filePath);
+
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::critical(parent,
+                            "File Error",
+                            QString("Failed to open file for writing:\n%1\nError: %2")
+                            .arg(filePath)
+                            .arg(file.errorString()));
+        return false;
+    }
+
+    QTextStream out(&file);
+    out << content;
+    file.close();
+
+    QMessageBox::information(parent,
+                           "Save Successful",
+                           QString("Successfully saved class %1 to:\n%2")
+                           .arg(className)
+                           .arg(filePath));
+    return true;
 }
 
+void updateDocumentationTextBox(const QString& classCatagory,
+    ButtonTextEdit * docsTextBoxes[], const QStringList& docSources,
+    QStackedWidget * rightStack, QLineEdit *editClassLine, PythonCodeEditor *editClassEditor) {
+    for (int i = 0; i < docSources.length(); i++) {
+        if (docSources.at(i) == classCatagory) {
+            QString documentedCode = documentPython(classCatagory);
+            docsTextBoxes[i]->setPlainText(documentedCode);
+            docsTextBoxes[i]->removeButtons();
+            QStringList docsTextLines = documentedCode.split("\n");
+            for (int j = 0; j < docsTextLines.length(); j++) {
+                const QString& line = docsTextLines.at(j);
+                if (line.startsWith("class ")) {
+                    docsTextBoxes[i]->addButton(j+1, "[EDIT]", ButtonTextEdit::Right, 75);
+                    docsTextBoxes[i]->addButton(j+1, "[DEL]", ButtonTextEdit::Right, 10);
+                }
+            }
+            QString singularClassName = pluralToSingular(docSources[i]).toUpper();
+            QObject::connect(docsTextBoxes[i], &ButtonTextEdit::buttonClicked,
+            [rightStack, editClassLine, singularClassName, editClassEditor, classCatagory,
+             docsTextBox = docsTextBoxes[i], docsTextBoxes, docSources](int lineNumber, const QString& text) {
 
+                QStringList lines = docsTextBox->toPlainText().split('\n');
+                QString className;
+
+                if (lineNumber >= 1 && lineNumber <= lines.size()) {
+                    QString line = lines[lineNumber - 1].trimmed();
+                    QRegularExpression classRegex("^class\\s+(\\w+)");
+                    QRegularExpressionMatch match = classRegex.match(line);
+                    if (match.hasMatch()) {
+                        className = match.captured(1);
+                    }
+                }
+
+                if (className.isEmpty())
+                    return;
+
+                QString filePath = "classes/" + classCatagory + "/" + className + ".py";
+                QString diskPath = QDir::currentPath() + "/" + filePath;
+
+                if (text == "[EDIT]") {
+                    rightStack->setCurrentIndex(2);
+                    editClassLine->setText(singularClassName);
+                    editClassEditor->setPlainText(readFromFile(filePath));
+                } else if (text == "[DEL]") {
+                    QMessageBox::StandardButton reply;
+                    reply = QMessageBox::question(nullptr, "Delete Class",
+                                                  QString("Are you sure you want to delete class '%1'?").arg(className),
+                                                  QMessageBox::Yes | QMessageBox::No);
+                    if (reply == QMessageBox::Yes) {
+                        if (QFile::exists(diskPath)) {
+                            if (!QFile::remove(diskPath)) {
+                                QMessageBox::warning(nullptr, "Delete Failed", "Could not delete the class file.");
+                                qWarning() << "Failed to delete:" << diskPath;
+                            } else {
+                                updateDocumentationTextBox(classCatagory, docsTextBoxes,
+                                    docSources, rightStack, editClassLine, editClassEditor);
+                            }
+                        } else {
+                            QMessageBox::warning(nullptr, "File Not Found", "The class file does not exist.");
+                            qWarning() << "File does not exist:" << diskPath;
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -529,6 +755,7 @@ int main(int argc, char *argv[]) {
     // project data
     QStringList mediaPath;
     QString currentVideo = "";
+    QString currentFile = "";
 
     // Main window widget
     QWidget window;
@@ -537,7 +764,9 @@ int main(int argc, char *argv[]) {
 
     // Color Palette
     QPalette palette = window.palette();
-    QColor nvWhite = QColor(250, 250, 255);
+    QColor nvWhite = QColor(245, 245, 255);
+    QColor nvMid = QColor(225, 225, 240);
+    QColor nvPurple = QColor(195, 175, 215);
     palette.setColor(QPalette::Window, nvWhite);
     palette.setColor(QPalette::Button, Qt::white);
     palette.setColor(QPalette::ButtonText, Qt::black);
@@ -583,7 +812,10 @@ int main(int argc, char *argv[]) {
     bottomButtonWidget->setLayout(bottomButtonLayout);
 
     // Create the code panel
-    QPlainTextEdit *codePanel = new PythonCodeEditor;
+    PythonCodeEditor *codePanel = new PythonCodeEditor;
+    codePanel->setSearchBarPadding(150, 75);
+    codePanel->setColor(nvPurple);
+    codePanel->setEditorFont(dotim5);
     codePanel->setPlaceholderText("INPUT"); // Set placeholder text
     codePanel->setLineWrapMode(QPlainTextEdit::NoWrap);
     codePanel->setFrameStyle(QFrame::Box | QFrame::Sunken);
@@ -596,8 +828,10 @@ int main(int argc, char *argv[]) {
     leftLayout->addWidget(bottomButtonWidget);
 
     // Create the right panel
+    QStackedWidget *rightStack = new QStackedWidget();
     // create help / media tab header
     TabsWidget *rightSideTabs  = new TabsWidget(false);
+    rightSideTabs->setColor(nvMid);
     rightSideTabs->setTabsFont(sftel_bold);
     rightSideTabs->addTab("M E D I A", "", false);
     rightSideTabs->addTab("C O M M A N D S", "", false);
@@ -606,6 +840,7 @@ int main(int argc, char *argv[]) {
 
     // create video headers
     TabsWidget *mediaHeader = new TabsWidget();
+    mediaHeader->setColor(nvMid);
     mediaHeader->setTabsFont(dotim5);
     mediaHeader->setLabelFont(dotim7);
     importMedia("render.mp4", mediaPath, codePanel, mediaHeader);
@@ -639,6 +874,7 @@ int main(int argc, char *argv[]) {
     // create video slider
     const int sliderSize = 1000;
     VideoSlider *videoSlider = new VideoSlider(player, sliderSize);
+    videoSlider->setColor(nvMid);
 
     // create timestamp
     QPushButton *timeStampButton  = new QPushButton();
@@ -660,39 +896,71 @@ int main(int argc, char *argv[]) {
     mediaContainerLayout->addWidget(mediaControlsWidget);
     mediaContainerLayout->addWidget(outputDisplay);
 
+    // create container for editing classes
+    QWidget *editClassContainer = new QWidget();
+    QVBoxLayout *editClassContainerLayout = new QVBoxLayout(editClassContainer);
+    QLineEdit *editClassLine = new QLineEdit();
+    editClassLine->setReadOnly(true);
+    editClassLine->setStyleSheet("QLineEdit{ background-color: none;  color: black; border: 0px;}");
+    editClassLine->setFont(dotim7);
+    editClassLine->setAlignment(Qt::AlignCenter);
+    editClassContainerLayout->addWidget(editClassLine);
+    PythonCodeEditor *editClassEditor = new PythonCodeEditor();
+    editClassEditor->setSearchBarPadding(150, 75);
+    editClassEditor->setColor(nvPurple);
+    editClassEditor->setEditorFont(dotim5);
+    editClassEditor->setPlaceholderText("INPUT"); // Set placeholder text
+    editClassEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
+    editClassEditor->setFrameStyle(QFrame::Box | QFrame::Sunken);
+    new PythonHighlighter(editClassEditor->document());
+    editClassContainerLayout->addWidget(editClassEditor);
+
+    // create cancel and done buttons for class editor
+    QWidget *editClassButtons = new QWidget();
+    QHBoxLayout *editClassButtonsLayout = new QHBoxLayout(editClassButtons);
+    QPushButton *cancelEditClassButton = new QPushButton("CANCEL");
+    cancelEditClassButton->setFont(sftel_bold);
+    QPushButton *doneEditClassButton = new QPushButton("DONE");
+    doneEditClassButton->setFont(sftel_bold);
+    editClassButtonsLayout->addWidget(cancelEditClassButton);
+    editClassButtonsLayout->addWidget(doneEditClassButton);
+    editClassContainerLayout->addWidget(editClassButtons);
+
     // create command tabs header
     TabsWidget *commandsHeader = new TabsWidget();
+    commandsHeader->setColor(nvMid);
     commandsHeader->setTabsFont(dotim5);
     commandsHeader->setLabelFont(dotim7);
     commandsHeader->addTab("Filters", "Filters", false);
     commandsHeader->addTab("Fields", "Fields", false);
-    commandsHeader->addTab("Other", "Other", false);
+    commandsHeader->addTab("Other", "Classes", false);
     commandsHeader->selectTab(0);
 
     // craate commands help container
     QWidget *commandsContainer = new QWidget();
     QVBoxLayout *commandsContainerLayout = new QVBoxLayout(commandsContainer);
     commandsContainerLayout->addWidget(commandsHeader);
-    QPlainTextEdit *commandsText = new QPlainTextEdit();
-    new PythonHighlighter(commandsText->document());
-    commandsText->setFont(dotim5);
-    commandsText->setReadOnly(true);
-    commandsText->setLineWrapMode(QPlainTextEdit::NoWrap);
 
     bool docOverride = true;
+
+    QStackedWidget *docStack = new QStackedWidget();
 
     QStringList docSources = {
         "filters",
         "fields",
         "classes"
     };
-    QString docsText[3];
+    QString docsText[docSources.size()];
+    ButtonTextEdit * docsTextBoxes[docSources.size()];
 
     for (int i = 0; i < docSources.size(); i++) {
         QString docName = docSources.at(i);
         QString docPath = "documentation/" + docName + ".txt";
 
         QFile docFile(docPath);
+
+        QWidget *docsPage = new QWidget();
+        QVBoxLayout *docsPageLayout = new QVBoxLayout(docsPage);
 
         if (docFile.exists() && docOverride == false) {
             // Read from the existing documentation .txt file
@@ -702,11 +970,11 @@ int main(int argc, char *argv[]) {
                 docFile.close();
             } else {
                 // Fall back if reading fails
-                docsText[i] = documentPython(":/resources/code/" + docName + ".py");
+                docsText[i] = documentPython(docName);
             }
         } else {
             // Generate documentation
-            docsText[i] = documentPython(":/resources/code/" + docName + ".py");
+            docsText[i] = documentPython(docName);
 
             // Save the generated documentation
             if (docFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
@@ -715,15 +983,42 @@ int main(int argc, char *argv[]) {
                 docFile.close();
             }
         }
+        docsTextBoxes[i] = new ButtonTextEdit();
+        docsTextBoxes[i]->setPlainText(docsText[i]);
+        docsTextBoxes[i]->setSearchBarPadding(150, 75);
+        updateDocumentationTextBox(docSources.at(i), docsTextBoxes,
+            docSources, rightStack, editClassLine, editClassEditor);
+        docsTextBoxes[i]->setColor(nvPurple);
+        new PythonHighlighter(docsTextBoxes[i]->document());
+        docsTextBoxes[i]->setEditorFont(dotim5);
+        docsTextBoxes[i]->setReadOnly(true);
+        docsTextBoxes[i]->setLineWrapMode(QPlainTextEdit::NoWrap);
+
+        docsPageLayout->addWidget(docsTextBoxes[i]);
+
+        QString singularClassName = pluralToSingular(docSources[i]).toUpper();
+
+        QPushButton *newClassButton = new QPushButton("NEW "+singularClassName);
+        newClassButton->setFont(sftel_bold);
+        docsPageLayout->addWidget(newClassButton);
+
+        docStack->addWidget(docsPage);
+
+        // make the new class button make a new class
+        QObject::connect(newClassButton, &QPushButton::clicked,
+            [rightStack, editClassLine, singularClassName, editClassEditor]() {
+            rightStack->setCurrentIndex(2);
+            editClassLine->setText(singularClassName);
+            editClassEditor->setPlainText(readFromFile(":/resources/code/default_"+singularClassName.toLower()+".py"));
+        });
     }
 
-    commandsText->setPlainText(docsText[0]);
-    commandsContainerLayout->addWidget(commandsText);
+    commandsContainerLayout->addWidget(docStack);
 
     // create tabbed right side widgets
-    QStackedWidget *rightStack = new QStackedWidget();
     rightStack->addWidget(mediaContainer);
     rightStack->addWidget(commandsContainer);
+    rightStack->addWidget(editClassContainer);
 
     // put right panel together
     rightLayout->addWidget(rightSideTabs);
@@ -748,7 +1043,24 @@ int main(int argc, char *argv[]) {
     // open default file
     createNewFile(codePanel, outputDisplay, mediaHeader);
 
+    // create shortcut for saving0
+    QShortcut *saveShortcut = new QShortcut(QKeySequence::Save, &window);
+
+
     // --------------- CONNECTIONS ---------------------
+
+    // map save shortcut
+    QObject::connect(saveShortcut, &QShortcut::activated, [codePanel, outputDisplay, &mediaPath, &currentFile]() {
+        QString programs[] = {codePanel->toPlainText()};
+
+        if (!currentFile.isEmpty()) {
+            // Save to current file if one exists
+            saveProjectToFile(programs, mediaPath, outputDisplay, currentFile);
+        } else {
+            // Otherwise prompt for new file name
+            currentFile = saveProjectToFile(programs, mediaPath, outputDisplay);
+        }
+    });
 
     // Make run button run python code
     QObject::connect(runButton, &QPushButton::clicked, [mediaHeader, outputDisplay, codePanel, mediaPanel]() {
@@ -765,11 +1077,12 @@ int main(int argc, char *argv[]) {
     });
 
     // Make the open button open a nv file
-    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath, mediaHeader]() {
+    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath, mediaHeader, &currentFile]() {
         QStringList programs;
         QStringList videos;
 
-        if (openProjectFromFile(&programs, &videos, outputDisplay)) {
+        currentFile = openProjectFromFile(&programs, &videos, outputDisplay);
+        if (!currentFile.isEmpty()) {
             if (!programs.isEmpty()) {
                 codePanel->setPlainText(programs.at(0));
             }
@@ -809,10 +1122,10 @@ int main(int argc, char *argv[]) {
 
 
     // Make save button download file
-    QObject::connect(saveButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath]() {
+    QObject::connect(saveButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath, &currentFile]() {
         QString programs[] = {codePanel->toPlainText()};
 
-        saveProjectToFile(programs, mediaPath, outputDisplay);
+        currentFile = saveProjectToFile(programs, mediaPath, outputDisplay);
     });
 
     // change from media to command tabs
@@ -821,9 +1134,27 @@ int main(int argc, char *argv[]) {
     });
 
     // change documentation based on selected tab
-    QObject::connect(commandsHeader, &TabsWidget::tabSelected, [docsText, commandsText](int index) {
-        commandsText->setPlainText(docsText[index]);
+    QObject::connect(commandsHeader, &TabsWidget::tabSelected, [docStack](int index) {
+        docStack->setCurrentIndex(index);
     });
+
+    // connect cancel button on class editor to go back to documentation
+    QObject::connect(cancelEditClassButton, &QPushButton::clicked, [rightStack]() {
+        rightStack->setCurrentIndex(1);
+    });
+
+    // connect done button on class editor to save
+    QObject::connect(doneEditClassButton, &QPushButton::clicked,
+        [commandsHeader, editClassEditor, rightStack, docSources, &docsTextBoxes, editClassLine]() {
+        QString classCatagory = commandsHeader->selectedTab()->getData().toLower();
+        saveClass(classCatagory,
+            editClassEditor->toPlainText());
+        updateDocumentationTextBox(classCatagory, docsTextBoxes, docSources,
+            rightStack, editClassLine, editClassEditor);
+
+        rightStack->setCurrentIndex(1);
+    });
+
 
     // ---------- FINAL SETUP ---------------
 

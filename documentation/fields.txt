@@ -1,4 +1,4 @@
-class Field:
+* class Field:
 
     __init__() -> None:
 #    Initialize a Field object with a blank, zero-filled map.
@@ -177,7 +177,7 @@ class Field:
 #        Field: The cropped Field object.
 #
 
-class FOverlay(Field):
+* class FOverlay(Field):
 
     __init__(opacity: float = 1.0) -> None:
 #    Initialize an FOverlay object with a uniform opacity field.
@@ -193,7 +193,7 @@ class FOverlay(Field):
 #        ValueError: If opacity is not within the range [0, 1].
 #
 
-class FLine(Field):
+* class FLine(Field):
 
     __init__(x1: float, y1: float, x2: float, y2: float, thickness: float) -> None:
 #    Initialize an FLine object that draws a straight line on the field.
@@ -212,7 +212,7 @@ class FLine(Field):
 #        ValueError: If thickness is not a positive number.
 #
 
-class FRect(Field):
+* class FRect(Field):
 
     __init__(x1: float, y1: float, x2: float, y2: float, thickness: int = -1) -> None:
 #    Initialize an FRect object that draws a rectangle on the field.
@@ -232,7 +232,7 @@ class FRect(Field):
 #        ValueError: If thickness is not -1 and is less than or equal to 0.
 #
 
-class FEllipse(Field):
+* class FEllipse(Field):
 #    Initialize an FEllipse object that draws an ellipse on the field.
 #
 #    Creates an ellipse centered at a given point with specified width, height,
@@ -252,7 +252,7 @@ class FEllipse(Field):
 #        ValueError: If thickness is not -1 and is less than or equal to 0.
 #
 
-class FPoly(Field):
+* class FPoly(Field):
 
     __init__(points: np.ndarray) -> None:
 #    Initialize an FPoly object that draws a filled polygon on the field.
@@ -271,7 +271,7 @@ class FPoly(Field):
 #        ValueError: If fewer than 3 points are provided.
 #
 
-class FText(Field):
+* class FText(Field):
 #    Initialize an FText object that renders text onto the field map.
 #
 #    Allows rendering text either using a custom TrueType font (via Pillow) or using
@@ -290,7 +290,7 @@ class FText(Field):
 #        FileNotFoundError: If a custom font path is provided but the file cannot be found.
 #
 
-class FAudio(Field):
+* class FAudio(Field):
 
     __init__(aud: FrameAudio, start: int = 0, end: int = None) -> None:
 #    Initialize an FAudio object to visualize the audio frame data on the field map.
@@ -307,5 +307,11 @@ class FAudio(Field):
 #    Raises:
 #        ValueError: If the start or end indices are invalid.
 #        Exception: If an error occurs during the visualization process.
+#
+
+class FCustom(Field):
+
+    __init__() -> None:
+#    Initialize a custom field.
 #
 

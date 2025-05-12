@@ -3,11 +3,11 @@
 #include <QTextBlock>
 
 PythonCodeEditor::PythonCodeEditor(QWidget *parent)
-    : QPlainTextEdit(parent), lineNumberArea(new LineNumberArea(this)) {
+    : SearchTextEdit(parent), lineNumberArea(new LineNumberArea(this)) {
     // Connect signals to update line number area and highlight the current line
-    connect(this, &QPlainTextEdit::blockCountChanged, this, &PythonCodeEditor::updateLineNumberAreaWidth);
-    connect(this, &QPlainTextEdit::updateRequest, this, &PythonCodeEditor::updateLineNumberArea);
-    connect(this, &QPlainTextEdit::cursorPositionChanged, this, &PythonCodeEditor::highlightCurrentLine);
+    connect(this, &SearchTextEdit::blockCountChanged, this, &PythonCodeEditor::updateLineNumberAreaWidth);
+    connect(this, &SearchTextEdit::updateRequest, this, &PythonCodeEditor::updateLineNumberArea);
+    connect(this, &SearchTextEdit::cursorPositionChanged, this, &PythonCodeEditor::highlightCurrentLine);
 
     updateLineNumberAreaWidth(0);
     highlightCurrentLine();
@@ -21,6 +21,18 @@ int PythonCodeEditor::lineNumberAreaWidth() const {
         ++digits;
     }
     return 3 + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits;
+}
+
+void PythonCodeEditor::setEditorFont(const QFont &font) {
+    SearchTextEdit::setEditorFont(font);
+
+    // Set the same font for the line number area
+    if (lineNumberArea) {
+        lineNumberArea->setFont(font);
+    }
+
+    // Update the line number area width since font metrics may have changed
+    updateLineNumberAreaWidth(0);
 }
 
 void PythonCodeEditor::toggleComment(QTextCursor &cursor) {
@@ -99,7 +111,7 @@ void PythonCodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event) {
 }
 
 void PythonCodeEditor::resizeEvent(QResizeEvent *event) {
-    QPlainTextEdit::resizeEvent(event);
+    SearchTextEdit::resizeEvent(event);
     QRect cr = contentsRect();
     lineNumberArea->setGeometry(QRect(cr.left(), cr.top(), lineNumberAreaWidth(), cr.height()));
 }
@@ -219,9 +231,7 @@ void PythonCodeEditor::keyPressEvent(QKeyEvent *event) {
         }
     }
 
-
-
-    QPlainTextEdit::keyPressEvent(event); // Default behavior for other keys
+    SearchTextEdit::keyPressEvent(event); // Default behavior for other keys
 }
 
 void PythonCodeEditor::handleConditionalPairInsertion(QTextCursor &cursor, const QString &open, const QString &close) {
@@ -290,7 +300,7 @@ void PythonCodeEditor::handleBackspace(QTextCursor &cursor) {
         }
     }
 
-    QPlainTextEdit::keyPressEvent(new QKeyEvent(QKeyEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier));
+    SearchTextEdit::keyPressEvent(new QKeyEvent(QKeyEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier));
 }
 
 void PythonCodeEditor::handleDelete(QTextCursor &cursor) {
@@ -313,7 +323,7 @@ void PythonCodeEditor::handleDelete(QTextCursor &cursor) {
             return;
         }
     }
-    QPlainTextEdit::keyPressEvent(new QKeyEvent(QKeyEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier));
+    SearchTextEdit::keyPressEvent(new QKeyEvent(QKeyEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier));
 }
 
 void PythonCodeEditor::handleAutoIndent(QTextCursor &cursor) {
@@ -332,7 +342,7 @@ void PythonCodeEditor::handleAutoIndent(QTextCursor &cursor) {
         leadingWhitespace.append("    ");
     }
 
-    QPlainTextEdit::keyPressEvent(new QKeyEvent(QKeyEvent::KeyPress, Qt::Key_Return, Qt::NoModifier));
+    SearchTextEdit::keyPressEvent(new QKeyEvent(QKeyEvent::KeyPress, Qt::Key_Return, Qt::NoModifier));
     cursor.insertText(leadingWhitespace);
     setTextCursor(cursor);
 }

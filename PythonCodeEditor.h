@@ -4,14 +4,17 @@
 #include <QPlainTextEdit>
 #include <QWidget>
 
+#include "SearchTextEdit.h"
+
 class LineNumberArea;
 
-class PythonCodeEditor : public QPlainTextEdit {
+class PythonCodeEditor : public SearchTextEdit {
     Q_OBJECT
 
 public:
     explicit PythonCodeEditor(QWidget *parent = nullptr);
 
+    void setEditorFont(const QFont &font);
     int lineNumberAreaWidth() const;
     void lineNumberAreaPaintEvent(QPaintEvent *event);
 
@@ -41,7 +44,14 @@ private slots:
 
 class LineNumberArea : public QWidget {
 public:
-    explicit LineNumberArea(PythonCodeEditor *editor) : QWidget(editor), codeEditor(editor) {}
+    LineNumberArea(PythonCodeEditor *editor) : QWidget(editor), codeEditor(editor) {
+        setFont(editor->font()); // Initialize with editor's font
+    }
+
+    void setFont(const QFont &font) {
+        QWidget::setFont(font);
+        update();
+    }
 
     QSize sizeHint() const override {
         return QSize(codeEditor->lineNumberAreaWidth(), 0);
