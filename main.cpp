@@ -26,6 +26,7 @@
 #include <QSlider>
 #include <QTimer>
 #include <QMessageBox>
+#include <QInputDialog>
 
 #include <QUrl>
 #include <opencv2/opencv.hpp>
@@ -41,6 +42,7 @@
 #include "PythonHighlighter.h"
 #include "PythonCodeEditor.h"
 #include "SearchTextEdit.h"
+#include "AiTextBoxWrapper.h"
 
 #include "TabsWidget.h"
 
@@ -236,6 +238,22 @@ QString combinePythonFiles(const QStringList &fileNames) {
     return combinedCode;
 }
 
+QString readFromFile(const QString& fileName) {
+    QFile file(fileName);
+    if (!file.exists()) {
+        return "";
+    }
+
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return "";
+    }
+
+    QString contents = file.readAll();
+    file.close();
+    return contents;
+}
+
+
 void remakeNeoverePy(QStringList &mediaPath) {
     QStringList pythonFiles = {
         "header",
@@ -255,8 +273,12 @@ void remakeNeoverePy(QStringList &mediaPath) {
             allPaths += ", ";
         }
     }
+
+    QString openaiKey = readFromFile("openai_key.txt");
+
     fileString.replace("%$#path#$%", allPaths);
     fileString.replace("[%$#arial#$%]", exportFontResourceToFile(":/resources/fonts/arial-bold.ttf"));
+    fileString.replace("api_key = \"\" #[%$# #$%]", "api_key = \"" + openaiKey +"\"");
     outFile << fileString.toStdString();
     outFile.close();
 }
@@ -379,14 +401,6 @@ void removeImportedTabs(TabsWidget *mediaHeader) {
             mediaHeader->removeTab(i);
         }
     }
-}
-
-QString readFromFile(QString fileName) {
-    QFile defaultFile(fileName);
-    defaultFile.open(QIODevice::ReadOnly);
-    QString contents = defaultFile.readAll();
-    defaultFile.close();
-    return contents;
 }
 
 void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText, TabsWidget * mediaHeader) {
@@ -658,9 +672,9 @@ bool saveClass(const QString &category, const QString &content, QWidget *parent 
     return true;
 }
 
-void updateDocumentationTextBox(const QString& classCatagory,
-    ButtonTextEdit * docsTextBoxes[], const QStringList& docSources,
-    QStackedWidget * rightStack, QLineEdit *editClassLine, PythonCodeEditor *editClassEditor) {
+void updateDocumentationTextBox(const QString &classCatagory,
+                                ButtonTextEdit *docsTextBoxes[], const QStringList &docSources,
+                                QStackedWidget *rightStack, QLineEdit *editClassLine, PythonCodeEditor *editClassEditor, QStringList &mediaPath) {
     for (int i = 0; i < docSources.length(); i++) {
         if (docSources.at(i) == classCatagory) {
             QString documentedCode = documentPython(classCatagory);
@@ -677,7 +691,7 @@ void updateDocumentationTextBox(const QString& classCatagory,
             QString singularClassName = pluralToSingular(docSources[i]).toUpper();
             QObject::connect(docsTextBoxes[i], &ButtonTextEdit::buttonClicked,
             [rightStack, editClassLine, singularClassName, editClassEditor, classCatagory,
-             docsTextBox = docsTextBoxes[i], docsTextBoxes, docSources](int lineNumber, const QString& text) {
+             docsTextBox = docsTextBoxes[i], docsTextBoxes, docSources, &mediaPath](int lineNumber, const QString& text) {
 
                 QStringList lines = docsTextBox->toPlainText().split('\n');
                 QString className;
@@ -713,7 +727,8 @@ void updateDocumentationTextBox(const QString& classCatagory,
                                 qWarning() << "Failed to delete:" << diskPath;
                             } else {
                                 updateDocumentationTextBox(classCatagory, docsTextBoxes,
-                                    docSources, rightStack, editClassLine, editClassEditor);
+                                    docSources, rightStack, editClassLine, editClassEditor, mediaPath);
+                                remakeNeoverePy(mediaPath);
                             }
                         } else {
                             QMessageBox::warning(nullptr, "File Not Found", "The class file does not exist.");
@@ -756,6 +771,16 @@ int main(int argc, char *argv[]) {
     QStringList mediaPath;
     QString currentVideo = "";
     QString currentFile = "";
+    QString openaiKey;
+    QFile keyFile("openai_key.txt");
+    if (keyFile.exists() && keyFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream in(&keyFile);
+        openaiKey = in.readLine().trimmed(); // Read and trim the key
+        keyFile.close();
+    } else {
+        openaiKey = "";
+    }
+
 
     // Main window widget
     QWidget window;
@@ -785,16 +810,19 @@ int main(int argc, char *argv[]) {
     QPushButton *openButton = new QPushButton("O P E N");
     QPushButton *newButton = new QPushButton("N E W");
     QPushButton *saveButton = new QPushButton("S A V E");
+    QPushButton *aiButton = new QPushButton("A I");
     QPushButton *exportButton = new QPushButton("E X P O R T");
     openButton->setFont(sftel_bold);
     newButton->setFont(sftel_bold);
     saveButton->setFont(sftel_bold);
+    aiButton->setFont(sftel_bold);
     exportButton->setFont(sftel_bold);
 
     QHBoxLayout *topButtonLayout = new QHBoxLayout();
     topButtonLayout->addWidget(openButton);
     topButtonLayout->addWidget(newButton);
     topButtonLayout->addWidget(saveButton);
+    topButtonLayout->addWidget(aiButton);
     topButtonLayout->addWidget(exportButton);
     QWidget *topButtonWidget = new QWidget();
     topButtonWidget->setLayout(topButtonLayout);
@@ -822,9 +850,13 @@ int main(int argc, char *argv[]) {
 
     new PythonHighlighter(codePanel->document());
 
+    AiTextBoxWrapper * aiCodePanel = new AiTextBoxWrapper(codePanel, openaiKey);
+    aiCodePanel->setColor(nvPurple);
+    aiCodePanel->setFont(dotim5);
+
     // Create the left panel
     leftLayout->addWidget(topButtonWidget);
-    leftLayout->addWidget(codePanel);
+    leftLayout->addWidget(aiCodePanel);
     leftLayout->addWidget(bottomButtonWidget);
 
     // Create the right panel
@@ -913,7 +945,11 @@ int main(int argc, char *argv[]) {
     editClassEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
     editClassEditor->setFrameStyle(QFrame::Box | QFrame::Sunken);
     new PythonHighlighter(editClassEditor->document());
-    editClassContainerLayout->addWidget(editClassEditor);
+
+    AiTextBoxWrapper * aiClassEditor = new AiTextBoxWrapper(editClassEditor, openaiKey);
+    aiClassEditor->setColor(nvPurple);
+    aiClassEditor->setFont(dotim5);
+    editClassContainerLayout->addWidget(aiClassEditor);
 
     // create cancel and done buttons for class editor
     QWidget *editClassButtons = new QWidget();
@@ -987,7 +1023,7 @@ int main(int argc, char *argv[]) {
         docsTextBoxes[i]->setPlainText(docsText[i]);
         docsTextBoxes[i]->setSearchBarPadding(150, 75);
         updateDocumentationTextBox(docSources.at(i), docsTextBoxes,
-            docSources, rightStack, editClassLine, editClassEditor);
+            docSources, rightStack, editClassLine, editClassEditor, mediaPath);
         docsTextBoxes[i]->setColor(nvPurple);
         new PythonHighlighter(docsTextBoxes[i]->document());
         docsTextBoxes[i]->setEditorFont(dotim5);
@@ -1128,6 +1164,39 @@ int main(int argc, char *argv[]) {
         currentFile = saveProjectToFile(programs, mediaPath, outputDisplay);
     });
 
+    QObject::connect(aiButton, &QPushButton::clicked, [&openaiKey]() {
+        // Load current key from file if it exists
+        QString currentKey;
+        QFile file("openai_key.txt");
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            currentKey = in.readLine().trimmed();
+            file.close();
+        }
+
+        bool ok;
+        QString key = QInputDialog::getText(nullptr,
+                                            "Set OpenAI API Key",
+                                            "Enter your OpenAI API key:",
+                                            QLineEdit::Normal,
+                                            currentKey,  // pre-fill with current key
+                                            &ok);
+
+        if (ok && !key.isEmpty()) {
+            openaiKey = key;
+
+            QFile outFile("openai_key.txt");
+            if (outFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&outFile);
+                out << openaiKey;
+                outFile.close();
+                QMessageBox::information(nullptr, "Success", "API key saved successfully.");
+            } else {
+                QMessageBox::critical(nullptr, "Error", "Failed to save API key.");
+            }
+        }
+    });
+
     // change from media to command tabs
     QObject::connect(rightSideTabs, &TabsWidget::tabSelected, [rightStack](int index) {
         rightStack->setCurrentIndex(index);
@@ -1145,14 +1214,16 @@ int main(int argc, char *argv[]) {
 
     // connect done button on class editor to save
     QObject::connect(doneEditClassButton, &QPushButton::clicked,
-        [commandsHeader, editClassEditor, rightStack, docSources, &docsTextBoxes, editClassLine]() {
+        [commandsHeader, editClassEditor, rightStack,
+            docSources, &docsTextBoxes, editClassLine, &mediaPath]() {
         QString classCatagory = commandsHeader->selectedTab()->getData().toLower();
         saveClass(classCatagory,
             editClassEditor->toPlainText());
         updateDocumentationTextBox(classCatagory, docsTextBoxes, docSources,
-            rightStack, editClassLine, editClassEditor);
+            rightStack, editClassLine, editClassEditor, mediaPath);
 
         rightStack->setCurrentIndex(1);
+        remakeNeoverePy(mediaPath);
     });
 
 

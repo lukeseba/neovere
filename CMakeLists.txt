@@ -37,6 +37,7 @@ set(SOURCES main.cpp MaintainFrame.cpp MaintainFrame.h
         SearchTextEdit.cpp
         SearchTextEdit.h
         ButtonTextEdit.h
+        aiTextBoxWrapper.h
 )
 qt_add_resources(SOURCES resources.qrc)
 

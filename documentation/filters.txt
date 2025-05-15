@@ -131,24 +131,12 @@
 #        Draw_Frame: The current instance with the frame mirrored along the y-axis.
 #
 
-class Custom_Filter(Filter):
-#A filter that overlays a solid color onto a Field-based mask.
+class Rainbow_Map(Filter):
+#A filter that maps each pixel to a full rainbow gradient based on its lightness.
 
     __init__(field: Optional[Field] = None) -> None:
-#    Initialize a Solid_Color filter.
-#
-#    Parameters:
-#
-#    field (Optional[Field]): Field object providing the overlay mask.
-#    If None, a default FOverlay() field will be used.
-#
+#    Initialize the Rainbow_Map with an optional Field mask.
 
     apply(pixels: np.ndarray) -> np.ndarray:
-#    Apply the solid color filter to pixel data using the field mask.
-#
-#    Parameters:
-#        pixels (np.ndarray): The pixel data to apply the filter to.
-#
-#    Returns:
-#        np.ndarray: The modified pixel data.
-#
+#    Convert input to grayscale then map to a full rainbow colormap.
+

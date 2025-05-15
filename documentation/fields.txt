@@ -309,9 +309,3 @@
 #        Exception: If an error occurs during the visualization process.
 #
 
-class FCustom(Field):
-
-    __init__() -> None:
-#    Initialize a custom field.
-#
-

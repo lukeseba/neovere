@@ -23,6 +23,4 @@ def generate_random_filename(length: int = 10, seed: int = None) -> str:
     characters = string.ascii_letters + string.digits
     return ''.join(random.choices(characters, k=length))
 
-def set_openai_key(key: str):
-    global api_key
-    api_key = key
+

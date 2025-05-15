@@ -26,10 +26,10 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4"]
+_paths = ["render.mp4", "C:/Users/luke/Downloads/1000044807.mp4"]
 arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 
-api_key = ""
+api_key = "" #[%$# #$%]
 
 audio_counter = 0
 
@@ -1164,9 +1164,7 @@ def generate_random_filename(length: int = 10, seed: int = None) -> str:
     characters = string.ascii_letters + string.digits
     return ''.join(random.choices(characters, k=length))
 
-def set_openai_key(key: str):
-    global api_key
-    api_key = key
+
 
 
 media = {}
@@ -1879,14 +1877,6 @@ if len(_paths) != 0:
 
 
 
-class FCustom(Field):
-    def __init__(self) -> None:
-        """Initialize a custom field.
-        """
-        super().__init__()
-
-        self._map = # initialize map for custom field
-
 if len(_paths) != 0:
     class Filter:
         """A filter that aligns a Field object with the current renderer dimensions."""
@@ -2128,30 +2118,38 @@ if len(_paths) != 0:
 
 
 
-class Custom_Filter(Filter):
-    """A filter that overlays a solid color onto a Field-based mask."""
+class Rainbow_Map(Filter):
+    """A filter that maps each pixel to a full rainbow gradient based on its lightness."""
 
     def __init__(self, field: Optional[Field] = None) -> None:
-        """Initialize a Solid_Color filter.
-
-        Parameters:
-
-            field (Optional[Field]): Field object providing the overlay mask.
-                If None, a default FOverlay() field will be used.
-        """
+        """Initialize the Rainbow_Map with an optional Field mask."""
         super().__init__(field)
 
     def apply(self, pixels: np.ndarray) -> np.ndarray:
-        """Apply the solid color filter to pixel data using the field mask.
+        """Convert input to grayscale then map to a full rainbow colormap."""
+        # Work in float for accurate blending
+        img = pixels.astype(np.float32)
 
-        Parameters:
-            pixels (np.ndarray): The pixel data to apply the filter to.
+        # Compute luminance (Rec. 601): Y = 0.299 R + 0.587 G + 0.114 B (note BGR input)
+        gray = 0.299 * img[:, :, 2] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 0]
+        norm = np.clip(gray / 255.0, 0.0, 1.0)
 
-        Returns:
-            np.ndarray: The modified pixel data.
-        """
-        pixels = # modify given pixels to apply filter.
-        return pixels * self._map # apply field (self._map) to mask the filter
+        # Map normalized brightness to hue (0°=red through ~150°=magenta)
+        # Hue range in OpenCV is [0,180]; we'll use up to 150 for full rainbow
+        hue = (norm * 150).astype(np.uint8)
+
+        # Full saturation and value
+        sat = np.full_like(hue, 255, dtype=np.uint8)
+        val = np.full_like(hue, 255, dtype=np.uint8)
+
+        # Merge into HSV image and convert to BGR
+        hsv = cv2.merge([hue, sat, val])
+        rainbow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32)
+
+        # Blend original and rainbow based on the field mask (self._map has shape HxWx1)
+        blended = (1.0 - self._map) * img + self._map * rainbow_bgr
+
+        return np.clip(blended, 0, 255).astype(np.uint8)
 
 
 

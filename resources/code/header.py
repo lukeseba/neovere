@@ -29,6 +29,6 @@ fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 _paths = [%$#path#$%]
 arial = "[%$#arial#$%]"
 
-api_key = ""
+api_key = "" #[%$# #$%]
 
 audio_counter = 0
