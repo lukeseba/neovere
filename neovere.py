@@ -1,4 +1,3 @@
-import numpy as np
 import subprocess
 import os
 import sys
@@ -16,6 +15,8 @@ import string
 import random
 from typing import List, Tuple
 import re
+import pickle
+
 
 
 try:
@@ -26,12 +27,20 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4", "C:/Users/luke/Downloads/1000044807.mp4"]
+_paths = ["render.mp4"]
 arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 
 api_key = "" #[%$# #$%]
+gpu_enabled = False
 
 audio_counter = 0
+
+if gpu_enabled:
+    import cupy as np
+else:
+    import numpy as np
+
+import numpy as rnp
 
 
 from typing import Union
@@ -215,7 +224,10 @@ class Frame:
             title (str): The window title for the preview.
         """
         window_name = title
-        cv2.imshow(window_name, self._pixels)
+        if gpu_enabled:
+            cv2.imshow(window_name, np.asnumpy(self._pixels))
+        else:
+            cv2.imshow(window_name, self._pixels)
         if wait_for_exit:
             while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
                 if cv2.waitKey(100) & 0xFF == ord('q'):
@@ -365,6 +377,8 @@ class Video:
         # Read the frame
         ret, frame = self.__video.read()
         if ret:
+            if gpu_enabled:
+                frame = np.asarray(frame)
             if h is None and w != 1.0:
                 frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
             elif h is not None:
@@ -481,14 +495,6 @@ class Audio:
             raise ValueError("Unsupported file type. Supported types are: mp4, mp3, wav.")
 
     def _get_fps(self) -> float:
-        """Extract the frames per second (FPS) from a video file using FFmpeg.
-
-        Returns:
-            float: The FPS value extracted from the video.
-
-        Raises:
-            ValueError: If FFmpeg fails to retrieve valid FPS information.
-        """
         command = [
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
@@ -496,10 +502,18 @@ class Audio:
             "-of", "csv=p=0",
             self._file_path
         ]
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
         fps_data = result.stdout.strip()
-        num, denom = map(int, fps_data.split('/'))
-        return num / denom
+
+        try:
+            num, denom = map(int, fps_data.split('/'))
+            fps = num / denom
+            if fps <= 0:
+                raise ValueError
+            return fps
+        except Exception:
+            raise ValueError(f"[Error] Could not extract FPS from video file: {fps_data}")
+
 
     def _extract_full_audio(self) -> str:
         """Extract the full audio content into a WAV file using FFmpeg.
@@ -524,7 +538,7 @@ class Audio:
             output_audio
         ]
         command = [arg for arg in command if arg]
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
 
         if result.returncode != 0:
             print("FFmpeg Error:", result.stderr)
@@ -545,21 +559,45 @@ class Audio:
             ValueError: If the audio data is empty or invalid.
         """
         audio_path = self._extract_full_audio()
-        sample_rate, audio_data = wavfile.read(audio_path)
+
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(f"Extracted audio file not found: {audio_path}")
+
+        try:
+            sample_rate, audio_data = wavfile.read(audio_path)
+        except Exception as e:
+            raise RuntimeError(f"[Error] Failed to read WAV file '{audio_path}': {e}")
+
+        if self._file_type != "wav":
+            try:
+                os.remove(audio_path)
+            except Exception as e:
+                print(f"[Warning] Failed to remove temporary audio file: {e}")
+
+        if audio_data.size == 0:
+            raise ValueError("[Error] Audio data is empty. The video may not have a valid audio track.")
+
+        # Convert stereo to mono
+        if audio_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+
+        # Normalize audio depending on its dtype
+        if audio_data.dtype == np.int16:
+            audio_data = audio_data.astype(np.float32) / 32768.0
+        elif audio_data.dtype == np.int32:
+            audio_data = audio_data.astype(np.float32) / 2147483648.0
+        elif np.issubdtype(audio_data.dtype, np.floating):
+            audio_data = np.clip(audio_data, -1.0, 1.0)
+        else:
+            raise TypeError(f"[Error] Unsupported audio dtype: {audio_data.dtype}")
 
         self._sample_rate = sample_rate
         self._duration = len(audio_data) / sample_rate
 
-        if self._file_type != "wav":
-            os.remove(audio_path)
-
-        if audio_data.dtype == np.int16:
-            audio_data = audio_data / 32768.0
-
-        if len(audio_data) == 0:
-            raise ValueError("Audio data is empty. Check the input file for a valid audio track.")
-
+        print(f"[Info] Loaded audio: sample_rate={sample_rate}, duration={self._duration:.2f}s, dtype={audio_data.dtype}")
         return audio_data
+
+
 
     def _get_duration(self) -> float:
         """Calculate the duration of the audio file.
@@ -602,7 +640,8 @@ class Audio:
         cache_file = f"AudioCache/{self._encode_cache_name(self._file_path)}.npy"
 
         if os.path.isfile(cache_file) and not reload:
-            full_audio_data = np.load(cache_file, allow_pickle=True)
+            full_audio_data = rnp.load(cache_file, allow_pickle=True)
+
             self._audio_data = full_audio_data[:-1]
             self._sample_rate = full_audio_data[-1]["sample rate"]
             self._duration = full_audio_data[-1]["duration"]
@@ -632,7 +671,7 @@ class Audio:
                 xf = fftfreq(len(frame_audio), 1 / self._sample_rate)
 
                 positive_frequencies = xf[:len(yf) // 2]
-                magnitude = np.abs(yf[:len(yf) // 2])
+                magnitude = rnp.abs(yf[:len(yf) // 2])
 
                 self._audio_data.append({
                     "volume": volume,
@@ -644,10 +683,10 @@ class Audio:
                 "duration": self._duration,
                 "sample rate": self._sample_rate
             })
-
-            np.save(cache_file, self._audio_data)
+            rnp.save(cache_file, self._audio_data)
 
         self._loaded = True
+
 
     def frame_audio(self, frame_index: int) -> FrameAudio:
         """Retrieve audio data corresponding to a specific frame.
@@ -678,7 +717,7 @@ class Audio:
         Returns:
             float: Total duration of the audio file.
         """
-        if not self._audio_data:
+        if not self._audio_data.all():
             self._load_audio_data()
 
         audio_path = self._extract_full_audio()
@@ -766,7 +805,10 @@ class NonlinearRenderer:
             )
 
         self.__frame_indices.append(frame_index)
-        self.__unordered_writer.write(new_frame.get_pixels(True))
+        write_pixels = new_frame.get_pixels(True)
+        if gpu_enabled:
+            write_pixels = np.asnumpy(write_pixels)
+        self.__unordered_writer.write(write_pixels)
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
 
     def attach_audio(self, audio: 'Audio', volume: float = 1.0) -> None:
@@ -883,9 +925,11 @@ class NonlinearRenderer:
                 unordered_render.set(cv2.CAP_PROP_POS_FRAMES, unordered_idx)
                 ret, frame = unordered_render.read()
                 if ret:
-                    if preview:
-                        Frame(frame).preview()
                     ordered_writer.write(frame)
+                    if preview:
+                        if gpu_enabled:
+                            frame = np.asarray(frame)
+                        Frame(frame).preview()
                 else:
                     raise ValueError(f"Could not read frame {frame_index}.")
 
@@ -2118,38 +2162,731 @@ if len(_paths) != 0:
 
 
 
-class Rainbow_Map(Filter):
-    """A filter that maps each pixel to a full rainbow gradient based on its lightness."""
+class Blur(Filter):
+    """A filter that applies a blur effect to the image using the field mask."""
 
-    def __init__(self, field: Optional[Field] = None) -> None:
-        """Initialize the Rainbow_Map with an optional Field mask."""
+    def __init__(self, blur_kernel: int = 5, field: Optional[Field] = None) -> None:
+        """Initialize a blur filter.
+
+        Parameters:
+            blur_kernel (int): Size of the blur kernel; must be positive and odd.
+            field (Optional[Field]): Field object providing the overlay mask.
+                If None, a default FOverlay() field will be used.
+        """
         super().__init__(field)
+        if blur_kernel < 1 or blur_kernel % 2 == 0:
+            raise ValueError("blur_kernel size must be a positive odd integer.")
+        self.blur_kernel = blur_kernel
 
     def apply(self, pixels: np.ndarray) -> np.ndarray:
-        """Convert input to grayscale then map to a full rainbow colormap."""
-        # Work in float for accurate blending
-        img = pixels.astype(np.float32)
+        """Apply the blur filter to pixel data using the field mask.
 
-        # Compute luminance (Rec. 601): Y = 0.299 R + 0.587 G + 0.114 B (note BGR input)
-        gray = 0.299 * img[:, :, 2] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 0]
-        norm = np.clip(gray / 255.0, 0.0, 1.0)
+        Parameters:
+            pixels (np.ndarray): The pixel data to apply the filter to.
 
-        # Map normalized brightness to hue (0°=red through ~150°=magenta)
-        # Hue range in OpenCV is [0,180]; we'll use up to 150 for full rainbow
-        hue = (norm * 150).astype(np.uint8)
+        Returns:
+            np.ndarray: The blurred pixel data masked by self._map.
+        """
+        # Ensure pixels are a CPU numpy array for OpenCV compatibility
+        if gpu_enabled:
+            pixels_cpu = np.asnumpy(pixels).astype(np.uint8)
+            blurred_cpu = cv2.GaussianBlur(pixels_cpu, (self.blur_kernel, self.blur_kernel), 0)
+            blurred = np.asarray(blurred_cpu)
+            # Convert back to GPU array if needed
+            if isinstance(pixels, np.ndarray) and pixels.__module__ == 'cupy':
+                blurred = np.asarray(blurred)
+        else:
+            blurred = cv2.GaussianBlur(pixels, (self.blur_kernel, self.blur_kernel), 0)
 
-        # Full saturation and value
-        sat = np.full_like(hue, 255, dtype=np.uint8)
-        val = np.full_like(hue, 255, dtype=np.uint8)
+        # Convert field map to match pixel channels if needed
+        mask = self._map
+        if mask.ndim == 2:
+            mask = mask[:, :, np.newaxis]
 
-        # Merge into HSV image and convert to BGR
-        hsv = cv2.merge([hue, sat, val])
-        rainbow_bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32)
-
-        # Blend original and rainbow based on the field mask (self._map has shape HxWx1)
-        blended = (1.0 - self._map) * img + self._map * rainbow_bgr
+        alpha = mask.astype(np.float32)
+        blended = alpha * blurred + (1.0 - alpha) * pixels
 
         return np.clip(blended, 0, 255).astype(np.uint8)
+
+class Color_Map(Filter):
+    """A filter that maps grayscale pixel intensities to a custom color gradient repeated multiple times."""
+
+    def __init__(self, colors: List[Tuple[int, int, int]] = None, repeat: int = 1, inverse_transition: bool = False, offset: float = 0.0, field: Optional[Field] = None) -> None:
+        """Initialize the Color_Map filter.
+
+        Parameters:
+            colors (List[Tuple[int, int, int]], optional): List of RGB tuples defining the color gradient.
+                Defaults to [(255, 255, 255), (0, 0, 0)] which is white to black.
+            repeat (int): Number of times to repeat the color map across the intensity range.
+            inverse_transition (bool): If True, every other repetition of the gradient is inverted
+                to create smooth transitions between repetitions.
+            offset (float): Offset to apply to the repetitions cycle, in the range [0, 1).
+            field (Optional[Field]): Field object providing the overlay mask.
+                If None, a default FOverlay() field will be used.
+        """
+        super().__init__(field)
+        if colors is None:
+            colors = [(255, 255, 255), (0, 0, 0)]
+        if repeat < 1:
+            raise ValueError("Repeat count must be at least 1.")
+        self.repeat = repeat
+        self.inverse_transition = inverse_transition
+        # Normalize offset into [0,1)
+        self.offset = offset % 1.0
+        
+        # Normalize colors to floats 0-1 for interpolation
+        self.color_stops = np.array(colors, dtype=np.float32) / 255.0
+
+    def apply(self, pixels: np.ndarray) -> np.ndarray:
+        """Apply the repeated custom color mapping filter to the pixel data.
+
+        Parameters:
+            pixels (np.ndarray): The pixel data to apply the filter to.
+
+        Returns:
+            np.ndarray: The color-mapped pixel data masked by self._map.
+        """
+        # Convert pixels to grayscale by luminance formula
+        gray = (0.299 * pixels[:, :, 2] + 0.587 * pixels[:, :, 1] + 0.114 * pixels[:, :, 0]).astype(np.uint8)
+        # Normalize grayscale to range [0, 1]
+        norm_gray = gray / 255.0
+
+        num_bins = 256
+        color_map = np.zeros((num_bins, 3), dtype=np.float32)
+
+        segments = len(self.color_stops) - 1
+        segment_length = num_bins // segments if segments > 0 else num_bins
+
+        for i in range(segments):
+            start_color = self.color_stops[i]
+            end_color = self.color_stops[i + 1]
+            for j in range(segment_length):
+                t = j / segment_length
+                color = (1 - t) * start_color + t * end_color
+                idx = i * segment_length + j
+                if idx < num_bins:
+                    color_map[idx] = color
+
+        # Fill any leftover bins with the last color stop
+        for idx in range(segments * segment_length, num_bins):
+            color_map[idx] = self.color_stops[-1] if len(self.color_stops) > 0 else np.array([1.0, 1.0, 1.0], dtype=np.float32)
+
+        # Prepare output array
+        new_pixels = np.zeros_like(pixels, dtype=np.float32)
+
+        # Repeat the normalized grayscale value scaled by repeat and add offset, then wrap by modulo 1
+        repeated_value = (norm_gray * self.repeat + self.offset) % 1.0
+
+        if self.inverse_transition:
+            # For repeated_value, determine for each pixel if floor of repetition is even or odd
+            repetition_indices = np.floor((norm_gray * self.repeat + self.offset)) .astype(int)
+            fractional_part = repeated_value
+
+            # For even repetitions keep fractional_part as is, for odd repetitions invert fractional_part to get smooth transition
+            fractional_part = np.where(repetition_indices % 2 == 1, 1.0 - fractional_part, fractional_part)
+
+            indices = (fractional_part * (num_bins - 1)).astype(np.int32)
+        else:
+            # Without inverse transition just use fractional part normally
+            indices = (repeated_value * (num_bins - 1)).astype(np.int32)
+
+        # Map pixels to custom colors (OpenCV uses BGR ordering)
+        new_pixels[:, :, 2] = color_map[indices, 0] * 255  # R channel
+        new_pixels[:, :, 1] = color_map[indices, 1] * 255  # G channel
+        new_pixels[:, :, 0] = color_map[indices, 2] * 255  # B channel
+
+        # Apply the filter mask (self._map) to blend with original pixels
+        map_3c = self._map
+        if map_3c.ndim == 4:
+            map_3c = np.squeeze(map_3c, axis=(2, 3))
+        if map_3c.ndim == 2:
+            map_3c = map_3c[:, :, np.newaxis]
+
+        blended = map_3c * new_pixels + (1 - map_3c) * pixels
+        return np.clip(blended, 0, 255).astype(np.uint8)
+
+class Rainbow_Map(Filter):
+    """A filter that maps grayscale pixel intensities to a rainbow gradient repeated multiple times."""
+
+    def __init__(self, repeat: int = 1, field: Optional[Field] = None) -> None:
+        """Initialize the Rainbow_Map filter.
+
+        Parameters:
+            repeat (int): Number of times to repeat the rainbow map across the intensity range.
+            field (Optional[Field]): Field object providing the overlay mask.
+                If None, a default FOverlay() field will be used.
+        """
+        super().__init__(field)
+        if repeat < 1:
+            raise ValueError("Repeat count must be at least 1.")
+        self.repeat = repeat
+
+    def apply(self, pixels: np.ndarray) -> np.ndarray:
+        """Apply the repeated rainbow mapping filter to the pixel data.
+
+        Parameters:
+            pixels (np.ndarray): The pixel data to apply the filter to.
+
+        Returns:
+            np.ndarray: The color-mapped pixel data masked by self._map.
+        """
+        # Convert pixels to grayscale by luminance formula
+        gray = (0.299 * pixels[:, :, 2] + 0.587 * pixels[:, :, 1] + 0.114 * pixels[:, :, 0]).astype(np.uint8)
+        # Normalize grayscale to range [0, 1]
+        norm_gray = gray / 255.0
+
+        # Create a rainbow colormap from red to purple
+        color_stops = np.array([
+            [1.0, 0.0, 0.0],   # Red
+            [1.0, 0.5, 0.0],   # Orange
+            [1.0, 1.0, 0.0],   # Yellow
+            [0.0, 1.0, 0.0],   # Green
+            [0.0, 0.0, 1.0],   # Blue
+            [0.29, 0.0, 0.51], # Indigo (approx)
+            [0.58, 0.0, 0.83]  # Purple
+        ], dtype=np.float32)
+
+        num_bins = 256
+        rainbow_map = np.zeros((num_bins, 3), dtype=np.float32)
+
+        segments = len(color_stops) - 1
+        segment_length = num_bins // segments
+
+        for i in range(segments):
+            start_color = color_stops[i]
+            end_color = color_stops[i + 1]
+            for j in range(segment_length):
+                t = j / segment_length
+                color = (1 - t) * start_color + t * end_color
+                idx = i * segment_length + j
+                if idx < num_bins:
+                    rainbow_map[idx] = color
+
+        for idx in range(segments * segment_length, num_bins):
+            rainbow_map[idx] = color_stops[-1]
+
+        # Repeat the normalized grayscale value to range [0, 1]*repeat then mod 1 so it wraps around
+        repeated_value = (norm_gray * self.repeat) % 1.0
+        indices = (repeated_value * (num_bins - 1)).astype(np.int32)
+
+        # Prepare output array
+        new_pixels = np.zeros_like(pixels, dtype=np.float32)
+
+        # Map pixels to rainbow colors (OpenCV uses BGR ordering)
+        new_pixels[:, :, 2] = rainbow_map[indices, 0] * 255  # R channel
+        new_pixels[:, :, 1] = rainbow_map[indices, 1] * 255  # G channel
+        new_pixels[:, :, 0] = rainbow_map[indices, 2] * 255  # B channel
+
+        # Apply the filter mask (self._map) to blend with original pixels
+        map_3c = self._map
+        if map_3c.ndim == 4:
+            map_3c = np.squeeze(map_3c, axis=(2, 3))
+        if map_3c.ndim == 2:
+            map_3c = map_3c[:, :, np.newaxis]
+
+        blended = map_3c * new_pixels + (1 - map_3c) * pixels
+        return np.clip(blended, 0, 255).astype(np.uint8)
+
+class Scanlines(Filter):
+    """
+    A filter that applies a CRT scanline effect"""
+
+    def __init__(self, intensity: float = 0.4, line_thickness: int = 1, line_spacing: int = 2, invert_lines: bool = False, field: Optional[Field] = None ) -> None:
+        """
+        Initialize the CRT_Scanline_Only_Filter.
+
+        Parameters:
+            intensity (float): The darkness factor for scanlines (0 = no darkening, 1 = full black lines).
+            line_thickness (int): Thickness in pixels of each scanline.
+            line_spacing (int): Number of pixels between start of one scanline and next (including thickness).
+            invert_lines (bool): If True, darken odd lines instead of even lines.
+            field (Optional[Field]): Overlay mask for applying the effect; defaults to FOverlay() if None.
+        """
+        if field is None:
+            field = FOverlay()
+        super().__init__(field)
+
+        if not (0.0 <= intensity <= 1.0):
+            raise ValueError("intensity must be between 0 and 1.")
+        if line_thickness < 1:
+            raise ValueError("line_thickness must be at least 1.")
+        if line_spacing < line_thickness:
+            raise ValueError("line_spacing must be >= line_thickness.")
+
+        self.intensity = intensity
+        self.line_thickness = line_thickness
+        self.line_spacing = line_spacing
+        self.invert_lines = invert_lines
+
+        # Precompute scanline mask map of shape (height, width)
+        height = renderer.height()
+        width = renderer.width()
+        mask = np.ones((height, width), dtype=np.float32)
+        for y in range(0, height, line_spacing):
+            # Decide if this line should be darkened depending on line parity and invert_lines
+            line_index = y // line_spacing
+            apply_dark = (line_index % 2 == 0) != invert_lines
+            if apply_dark:
+                end_y = min(y + line_thickness, height)
+                mask[y:end_y, :] = 1.0 - intensity  # darken line
+
+        self.scanline_map = mask  # float32 mask with values near 1 or reduced by intensity
+
+    def apply(self, pixels: np.ndarray) -> np.ndarray:
+        """
+        Apply the CRT scanline effect to the pixel data.
+
+        Parameters:
+            pixels (np.ndarray): Input image pixels as (H,W,3) uint8 array.
+
+        Returns:
+            np.ndarray: The pixel data with CRT scanline effect applied.
+        """
+        # Convert pixels to float for calculation
+        pixels_f = pixels.astype(np.float32)
+
+        # Expand scanline mask to 3 channels
+        scanline_mask_3c = self.scanline_map[:, :, np.newaxis]
+
+        # Apply the scanline intensity mask
+        filtered_pixels = pixels_f * scanline_mask_3c
+
+        # Blend with original pixels using the field mask self._map
+        # Normalize self._map to range [0, 1]
+        if self._map.ndim == 2:
+            alpha = self._map.astype(np.float32)
+            max_alpha = np.max(alpha)
+            if max_alpha > 0:
+                alpha = alpha / max_alpha
+            alpha = alpha[:, :, np.newaxis]
+        elif self._map.ndim == 3:
+            alpha = self._map.astype(np.float32)
+            max_alpha = np.max(alpha)
+            if max_alpha > 0:
+                alpha = alpha / max_alpha
+        else:
+            alpha = np.ones_like(scanline_mask_3c, dtype=np.float32)
+
+        blended = alpha * filtered_pixels + (1 - alpha) * pixels_f
+
+        return np.clip(blended, 0, 255).astype(np.uint8)
+
+class Screen_Tear(Filter):
+    """A filter that simulates capturing a CRT screen partially through drawing the frame,
+    showing partial frame reveal, blending with a previous frame for open areas."""
+
+    def __init__(self, previous_frame: Optional[Frame] = None, reveal_fraction: float = 0.5, field: Optional[Field] = None) -> None:
+        """
+        Initialize the CRT_Scanline_Filter without internal scanlines.
+
+        Parameters:
+            previous_frame (Optional[Frame]): The previous Frame to show in the uncovered region.
+                If None, black will be used for empty areas.
+            reveal_fraction (float): Fraction of the frame height revealed (0.0 to 1.0).
+            field (Optional[Field]): Field overlay mask, default to FOverlay() if None.
+        """
+        super().__init__(field)
+        if not (0.0 <= reveal_fraction <= 1.0):
+            raise ValueError("reveal_fraction must be between 0.0 and 1.0")
+        self.previous_frame = previous_frame
+        self.reveal_fraction = reveal_fraction
+
+        # Precompute a mask of all ones since scanlines are handled by separate Scanlines filter
+        height = renderer.height()
+        width = renderer.width()
+        self.scanline_map = np.ones((height, width), dtype=np.float32)  # No darkening here
+
+    def apply(self, pixels: np.ndarray) -> np.ndarray:
+        """
+        Apply the partial frame reveal effect only.
+
+        Parameters:
+            pixels (np.ndarray): The current frame pixel data.
+
+        Returns:
+            np.ndarray: The pixel data with partial reveal effect applied.
+        """
+        height, width = pixels.shape[:2]
+        reveal_rows = int(height * self.reveal_fraction)
+        # Clamp reveal_rows to height
+        reveal_rows = max(0, min(reveal_rows, height))
+
+        # Create an output canvas initially with previous frame or black if none
+        if self.previous_frame:
+            prev_pixels = self.previous_frame.get_pixels(standard_size=True)
+            if prev_pixels.shape[:2] != (height, width):
+                # Resize previous frame pixels to match current frame size
+                prev_pixels = cv2.resize(prev_pixels, (width, height), interpolation=cv2.INTER_LINEAR)
+        else:
+            prev_pixels = np.zeros((height, width, 3), dtype=np.uint8)
+
+        # Compose the partial frame: top reveal_rows from pixels, rest from prev_pixels
+        output_pixels = np.zeros_like(pixels, dtype=np.float32)
+        output_pixels[:reveal_rows, :, :] = pixels[:reveal_rows, :, :]
+        output_pixels[reveal_rows:, :, :] = prev_pixels[reveal_rows:, :, :]
+
+        # Apply the mask (all ones, so no change here)
+        scanline_mask_3c = self.scanline_map[:, :, np.newaxis]
+        output_pixels = output_pixels.astype(np.float32) * scanline_mask_3c
+
+        # Blend with field mask - use self._map as alpha mask for blending original pixels and partial reveal output
+        if self._map.ndim == 2:
+            alpha = self._map.astype(np.float32)
+            alpha = alpha[:, :, np.newaxis]  # shape (h, w, 1)
+        elif self._map.ndim == 3:
+            alpha = self._map.astype(np.float32)
+        else:
+            alpha = np.ones((height, width, 1), dtype=np.float32)
+
+        # Normalize alpha to 0 to 1
+        alpha = alpha / np.max(alpha) if np.max(alpha) > 0 else alpha
+
+        # Blend original pixels with partial reveal output by alpha mask
+        blended = alpha * output_pixels + (1 - alpha) * pixels
+        blended = np.clip(blended, 0, 255)
+
+        return blended.astype(np.uint8)
+
+class SideOffsetFilter(Filter):
+    """A filter that offsets lines of pixels based on an angle (0-360 degrees),
+    wrapping pixels that are pushed off-screen around to the opposite side.
+
+    The offset values array length will be resampled via interpolation to match frame height (for mostly vertical shifts)
+    or frame width (for mostly horizontal shifts) depending on the angle.
+
+    Angles:
+        - 0 or 360 degrees: offset horizontally to the right (like side=2 Right).
+        - 90 degrees: offset vertically downward (like side=3 Bottom).
+        - 180 degrees: offset horizontally to the left (like side=0 Left).
+        - 270 degrees: offset vertically upward (like side=1 Top).
+        - Intermediate angles interpolate offsets in both directions proportionally.
+          The offset is applied along a vector line rotated by the angle, with values along that line.
+    """
+
+    def __init__(self, values: np.ndarray, angle: float, blend_width: int = 10, field: Optional[Field] = None) -> None:
+        """
+        Initialize the SideOffsetFilter with angle-based offset.
+
+        Args:
+            values (np.ndarray): 1D array of floats in [0,1] representing offset magnitude.
+                These represent offset values along a line (like a waveform) that will be rotated by the angle.
+            angle (float): Offset angle in degrees [0-360).
+            blend_width (int): Width in pixels over which to blend edges.
+            field (Optional[Field]): Field for masking. Defaults to FOverlay() if None.
+        """
+        super().__init__(field)
+        if not (0 <= angle < 360):
+            angle = angle % 360
+        if not isinstance(values, np.ndarray):
+            raise TypeError("Values must be a numpy ndarray.")
+        if values.ndim != 1:
+            raise ValueError("Values array must be 1D.")
+        if blend_width < 0:
+            raise ValueError("blend_width must be non-negative.")
+
+        self.values = values.astype(np.float32)
+        self.angle = angle
+        self.blend_width = blend_width
+
+    def _resample_values(self, target_length: int) -> np.ndarray:
+        """Resample self.values to target_length using linear interpolation."""
+        if len(self.values) == target_length:
+            return self.values
+        if len(self.values) == 1:
+            return np.full(target_length, self.values[0], dtype=np.float32)
+
+        orig_x = np.linspace(0, 1, len(self.values))
+        target_x = np.linspace(0, 1, target_length)
+        resampled = np.interp(target_x, orig_x, self.values)
+        return resampled.astype(np.float32)
+
+    def apply(self, pixels: np.ndarray) -> np.ndarray:
+        """
+        Apply the offset effect by treating the values as a line along the rotated axis,
+        offsetting pixels in the direction of the angle accordingly with wrapping and blending.
+
+        Args:
+            pixels (np.ndarray): Input image pixels as (H, W, 3) uint8 array.
+
+        Returns:
+            np.ndarray: Offset pixels blended with original using self._map mask.
+        """
+        height, width = pixels.shape[:2]
+        bw = self.blend_width
+        pixels_f = pixels.astype(np.float32)
+
+        angle_int = int(round(self.angle)) % 360
+
+        # Optimize for cardinal angles: 0, 90, 180, 270, 360
+        if angle_int == 0 or angle_int == 360:
+            # Horizontal offset to right
+            resampled_values = self._resample_values(width)
+            max_offset = width
+            offsets = resampled_values * max_offset  # length width
+            # Create output array
+            output = np.empty_like(pixels_f)
+            for y in range(height):
+                row = pixels_f[y]
+                row_offset = int(offsets[y if y < len(offsets) else -1]) if len(offsets) == height else int(offsets[y % width])
+                # Use vectorized shift with wrap
+                offset_vals = offsets
+                # Since offsets length == width, shift each row by offsets[x]? No, offsets along x axis, needed to treat properly
+                # offsets is 1D along horizontal dimension (width)
+                # Actually, offsets length == width, so each pixel column has offset value
+                # But for horizontal shift, offsets should be along vertical dimension (height)? Original logic uses resample to length line_length, which is width here for horizontal line, so resampled_values length == width
+
+                # For horizontal shift of each row by per-column offset does not make sense, so must resample per row for vertical offsets - here horizontal shift implies offsets per row
+
+                # For horizontal shift, offsets length should be equal to height, one value per row
+
+            # Correction: For 0 degrees, horizontal offset, offsets length should be number of rows (height), each row shifted by offset
+
+            resampled_values = self._resample_values(height)
+            offsets = (resampled_values * width).astype(int)  # one offset per row
+            output = np.empty_like(pixels_f)
+
+            for y in range(height):
+                offset = offsets[y]
+                # Shift row y pixels to right by offset, wrap-around
+                row = pixels_f[y]
+                output[y] = np.roll(row, offset, axis=0)
+            
+            # Calculate blend mask
+            blend_mask = np.ones((height, width), dtype=np.float32)
+            if bw > 0:
+                norm_offset = offsets[:, None]  # shape (height,1)
+                blend_dist_start = np.clip(norm_offset / bw, 0, 1)
+                blend_dist_end = np.clip((width - norm_offset) / bw, 0, 1)
+                blend_mask = np.minimum(blend_dist_start, blend_dist_end)
+                blend_mask = np.repeat(blend_mask, width, axis=1)
+
+            blend_mask_3c = blend_mask[:, :, None]
+
+            # Normalize field map alpha
+            if self._map.ndim == 2:
+                mask_alpha = self._map.astype(np.float32)
+                max_alpha = np.max(mask_alpha)
+                if max_alpha > 0:
+                    mask_alpha /= max_alpha
+                mask_alpha = mask_alpha[:, :, None]
+            elif self._map.ndim == 3:
+                mask_alpha = self._map.astype(np.float32)
+                max_alpha = np.max(mask_alpha)
+                if max_alpha > 0:
+                    mask_alpha /= max_alpha
+            else:
+                mask_alpha = np.ones((height, width, 1), dtype=np.float32)
+
+            final_alpha = mask_alpha * blend_mask_3c
+            output = final_alpha * output + (1 - final_alpha) * pixels_f
+            return np.clip(output, 0, 255).astype(np.uint8)
+
+        elif angle_int == 180:
+            # Horizontal offset to left (negative horizontal offset)
+            resampled_values = self._resample_values(height)
+            offsets = (resampled_values * width).astype(int)
+            output = np.empty_like(pixels_f)
+            for y in range(height):
+                offset = offsets[y]
+                row = pixels_f[y]
+                output[y] = np.roll(row, -offset, axis=0)
+
+            blend_mask = np.ones((height, width), dtype=np.float32)
+            if bw > 0:
+                norm_offset = offsets[:, None]
+                blend_dist_start = np.clip(norm_offset / bw, 0, 1)
+                blend_dist_end = np.clip((width - norm_offset) / bw, 0, 1)
+                blend_mask = np.minimum(blend_dist_start, blend_dist_end)
+                blend_mask = np.repeat(blend_mask, width, axis=1)
+
+            blend_mask_3c = blend_mask[:, :, None]
+
+            if self._map.ndim == 2:
+                mask_alpha = self._map.astype(np.float32)
+                max_alpha = np.max(mask_alpha)
+                if max_alpha > 0:
+                    mask_alpha /= max_alpha
+                mask_alpha = mask_alpha[:, :, None]
+            elif self._map.ndim == 3:
+                mask_alpha = self._map.astype(np.float32)
+                max_alpha = np.max(mask_alpha)
+                if max_alpha > 0:
+                    mask_alpha /= max_alpha
+            else:
+                mask_alpha = np.ones((height, width, 1), dtype=np.float32)
+
+            final_alpha = mask_alpha * blend_mask_3c
+            output = final_alpha * output + (1 - final_alpha) * pixels_f
+            return np.clip(output, 0, 255).astype(np.uint8)
+
+        elif angle_int == 90:
+            # Vertical offset downward
+            resampled_values = self._resample_values(width)
+            offsets = (resampled_values * height).astype(int)
+            output = np.empty_like(pixels_f)
+            for x in range(width):
+                column = pixels_f[:, x, :]
+                offset = offsets[x]
+                output[:, x, :] = np.roll(column, offset, axis=0)
+
+            blend_mask = np.ones((height, width), dtype=np.float32)
+            if bw > 0:
+                norm_offset = offsets[None, :]
+                blend_dist_start = np.clip(norm_offset / bw, 0, 1)
+                blend_dist_end = np.clip((height - norm_offset) / bw, 0, 1)
+                blend_mask = np.minimum(blend_dist_start, blend_dist_end)
+                blend_mask = np.repeat(blend_mask, height, axis=0)
+
+            blend_mask_3c = blend_mask[:, :, None]
+
+            if self._map.ndim == 2:
+                mask_alpha = self._map.astype(np.float32)
+                max_alpha = np.max(mask_alpha)
+                if max_alpha > 0:
+                    mask_alpha /= max_alpha
+                mask_alpha = mask_alpha[:, :, None]
+            elif self._map.ndim == 3:
+                mask_alpha = self._map.astype(np.float32)
+                max_alpha = np.max(mask_alpha)
+                if max_alpha > 0:
+                    mask_alpha /= max_alpha
+            else:
+                mask_alpha = np.ones((height, width, 1), dtype=np.float32)
+
+            final_alpha = mask_alpha * blend_mask_3c
+            output = final_alpha * output + (1 - final_alpha) * pixels_f
+            return np.clip(output, 0, 255).astype(np.uint8)
+
+        elif angle_int == 270:
+            # Vertical offset upward
+            resampled_values = self._resample_values(width)
+            offsets = (resampled_values * height).astype(int)
+            output = np.empty_like(pixels_f)
+            for x in range(width):
+                column = pixels_f[:, x, :]
+                offset = offsets[x]
+                output[:, x, :] = np.roll(column, -offset, axis=0)
+
+            blend_mask = np.ones((height, width), dtype=np.float32)
+            if bw > 0:
+                norm_offset = offsets[None, :]
+                blend_dist_start = np.clip(norm_offset / bw, 0, 1)
+                blend_dist_end = np.clip((height - norm_offset) / bw, 0, 1)
+                blend_mask = np.minimum(blend_dist_start, blend_dist_end)
+                blend_mask = np.repeat(blend_mask, height, axis=0)
+
+            blend_mask_3c = blend_mask[:, :, None]
+
+            if self._map.ndim == 2:
+                mask_alpha = self._map.astype(np.float32)
+                max_alpha = np.max(mask_alpha)
+                if max_alpha > 0:
+                    mask_alpha /= max_alpha
+                mask_alpha = mask_alpha[:, :, None]
+            elif self._map.ndim == 3:
+                mask_alpha = self._map.astype(np.float32)
+                max_alpha = np.max(mask_alpha)
+                if max_alpha > 0:
+                    mask_alpha /= max_alpha
+            else:
+                mask_alpha = np.ones((height, width, 1), dtype=np.float32)
+
+            final_alpha = mask_alpha * blend_mask_3c
+            output = final_alpha * output + (1 - final_alpha) * pixels_f
+            return np.clip(output, 0, 255).astype(np.uint8)
+
+        # Else for other angles execute original full calculation path
+        output = np.empty_like(pixels_f)
+        angle_rad = np.deg2rad(self.angle)
+        sin_a = np.sin(angle_rad)
+        cos_a = np.cos(angle_rad)
+
+        dir_vec = np.array([cos_a, sin_a], dtype=np.float32)
+        offset_vec = np.array([-sin_a, cos_a], dtype=np.float32)
+
+        corners = np.array([[0,0], [width-1, 0], [0, height-1], [width-1, height-1]], dtype=np.float32)
+        proj = np.dot(corners, dir_vec)
+        min_proj = proj.min()
+        max_proj = proj.max()
+        line_length = max_proj - min_proj
+        length_int = max(1, int(np.ceil(line_length)))
+        resampled_values = self._resample_values(length_int)
+        max_offset = max(height, width)
+
+        xs, ys = np.meshgrid(np.arange(width), np.arange(height))
+        coords = np.stack((xs, ys), axis=-1).astype(np.float32)
+
+        proj_coords = np.dot(coords, dir_vec)
+        proj_normalized = (proj_coords - min_proj) / line_length * (length_int - 1)
+        proj_normalized_clipped = np.clip(proj_normalized, 0, length_int - 1)
+
+        idx_low = np.floor(proj_normalized_clipped).astype(int)
+        idx_high = np.clip(idx_low + 1, 0, length_int - 1)
+        weight_high = proj_normalized_clipped - idx_low
+        weight_low = 1.0 - weight_high
+
+        try:
+            offset_vals = weight_low * resampled_values[idx_low] + weight_high * resampled_values[idx_high]
+        except IndexError:
+            offset_vals = np.zeros_like(proj_normalized_clipped, dtype=np.float32)
+
+        offsets = offset_vals * max_offset
+        offset_dx = offset_vec[0] * offsets
+        offset_dy = offset_vec[1] * offsets
+
+        new_x = (xs + offset_dx).astype(np.float32)
+        new_y = (ys + offset_dy).astype(np.float32)
+
+        new_x_wrapped = np.mod(new_x, width)
+        new_y_wrapped = np.mod(new_y, height)
+
+        x0 = np.floor(new_x_wrapped).astype(int)
+        x1 = (x0 + 1) % width
+        y0 = np.floor(new_y_wrapped).astype(int)
+        y1 = (y0 + 1) % height
+
+        x_frac = new_x_wrapped - x0
+        y_frac = new_y_wrapped - y0
+
+        try:
+            p00 = pixels_f[y0, x0]
+            p10 = pixels_f[y0, x1]
+            p01 = pixels_f[y1, x0]
+            p11 = pixels_f[y1, x1]
+        except IndexError:
+            return pixels
+
+        top = p00 * (1 - x_frac[..., None]) + p10 * x_frac[..., None]
+        bottom = p01 * (1 - x_frac[..., None]) + p11 * x_frac[..., None]
+        p = top * (1 - y_frac[..., None]) + bottom * y_frac[..., None]
+
+        blend_mask = np.ones((height, width), dtype=np.float32)
+        if bw > 0:
+            norm_offset = offsets
+            blend_dist_start = np.clip(norm_offset / bw, 0, 1)
+            blend_dist_end = np.clip((max_offset - norm_offset) / bw, 0, 1)
+            blend_mask = np.minimum(blend_dist_start, blend_dist_end)
+
+        blend_mask_3c = blend_mask[:, :, None]
+
+        if self._map.ndim == 2:
+            mask_alpha = self._map.astype(np.float32)
+            max_alpha = np.max(mask_alpha)
+            if max_alpha > 0:
+                mask_alpha /= max_alpha
+            mask_alpha = mask_alpha[:, :, None]
+        elif self._map.ndim == 3:
+            mask_alpha = self._map.astype(np.float32)
+            max_alpha = np.max(mask_alpha)
+            if max_alpha > 0:
+                mask_alpha /= max_alpha
+        else:
+            mask_alpha = np.ones((height, width, 1), dtype=np.float32)
+
+        final_alpha = mask_alpha * blend_mask_3c
+        output = final_alpha * p + (1 - final_alpha) * pixels_f
+
+        return np.clip(output, 0, 255).astype(np.uint8)
 
 
 

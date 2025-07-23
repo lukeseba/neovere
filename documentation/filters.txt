@@ -131,12 +131,167 @@
 #        Draw_Frame: The current instance with the frame mirrored along the y-axis.
 #
 
-class Rainbow_Map(Filter):
-#A filter that maps each pixel to a full rainbow gradient based on its lightness.
+class Blur(Filter):
+#A filter that applies a blur effect to the image using the field mask.
 
-    __init__(field: Optional[Field] = None) -> None:
-#    Initialize the Rainbow_Map with an optional Field mask.
+    __init__(blur_kernel: int = 5, field: Optional[Field] = None) -> None:
+#    Initialize a blur filter.
+#
+#    Parameters:
+#        blur_kernel (int): Size of the blur kernel; must be positive and odd.
+#        field (Optional[Field]): Field object providing the overlay mask.
+#        If None, a default FOverlay() field will be used.
+#
 
     apply(pixels: np.ndarray) -> np.ndarray:
-#    Convert input to grayscale then map to a full rainbow colormap.
+#    Apply the blur filter to pixel data using the field mask.
+#
+#    Parameters:
+#        pixels (np.ndarray): The pixel data to apply the filter to.
+#
+#    Returns:
+#        np.ndarray: The blurred pixel data masked by self._map.
+#
+
+class Color_Map(Filter):
+#A filter that maps grayscale pixel intensities to a custom color gradient repeated multiple times.
+
+    __init__(colors: List[Tuple[int, int, int]] = None, repeat: int = 1, inverse_transition: bool = False, offset: float = 0.0, field: Optional[Field] = None) -> None:
+#    Initialize the Color_Map filter.
+#
+#    Parameters:
+#        colors (List[Tuple[int, int, int]], optional): List of RGB tuples defining the color gradient.
+#        Defaults to [(255, 255, 255), (0, 0, 0)] which is white to black.
+#        repeat (int): Number of times to repeat the color map across the intensity range.
+#        inverse_transition (bool): If True, every other repetition of the gradient is inverted
+#        to create smooth transitions between repetitions.
+#        offset (float): Offset to apply to the repetitions cycle, in the range [0, 1).
+#        field (Optional[Field]): Field object providing the overlay mask.
+#        If None, a default FOverlay() field will be used.
+#
+
+    apply(pixels: np.ndarray) -> np.ndarray:
+#    Apply the repeated custom color mapping filter to the pixel data.
+#
+#    Parameters:
+#        pixels (np.ndarray): The pixel data to apply the filter to.
+#
+#    Returns:
+#        np.ndarray: The color-mapped pixel data masked by self._map.
+#
+
+class Rainbow_Map(Filter):
+#A filter that maps grayscale pixel intensities to a rainbow gradient repeated multiple times.
+
+    __init__(repeat: int = 1, field: Optional[Field] = None) -> None:
+#    Initialize the Rainbow_Map filter.
+#
+#    Parameters:
+#        repeat (int): Number of times to repeat the rainbow map across the intensity range.
+#        field (Optional[Field]): Field object providing the overlay mask.
+#        If None, a default FOverlay() field will be used.
+#
+
+    apply(pixels: np.ndarray) -> np.ndarray:
+#    Apply the repeated rainbow mapping filter to the pixel data.
+#
+#    Parameters:
+#        pixels (np.ndarray): The pixel data to apply the filter to.
+#
+#    Returns:
+#        np.ndarray: The color-mapped pixel data masked by self._map.
+#
+
+class Scanlines(Filter):
+#
+#A filter that applies a CRT scanline effect
+
+    __init__(intensity: float = 0.4, line_thickness: int = 1, line_spacing: int = 2, invert_lines: bool = False, field: Optional[Field] = None) -> None:
+#
+#    Initialize the CRT_Scanline_Only_Filter.
+#
+#    Parameters:
+#        intensity (float): The darkness factor for scanlines (0 = no darkening, 1 = full black lines).
+#        line_thickness (int): Thickness in pixels of each scanline.
+#        line_spacing (int): Number of pixels between start of one scanline and next (including thickness).
+#        invert_lines (bool): If True, darken odd lines instead of even lines.
+#        field (Optional[Field]): Overlay mask for applying the effect; defaults to FOverlay() if None.
+#
+
+    apply(pixels: np.ndarray) -> np.ndarray:
+#
+#    Apply the CRT scanline effect to the pixel data.
+#
+#    Parameters:
+#        pixels (np.ndarray): Input image pixels as (H,W,3) uint8 array.
+#
+#    Returns:
+#        np.ndarray: The pixel data with CRT scanline effect applied.
+#
+
+class Screen_Tear(Filter):
+#A filter that simulates capturing a CRT screen partially through drawing the frame,
+#showing partial frame reveal, blending with a previous frame for open areas.
+
+    __init__(previous_frame: Optional[Frame] = None, reveal_fraction: float = 0.5, field: Optional[Field] = None) -> None:
+#
+#    Initialize the CRT_Scanline_Filter without internal scanlines.
+#
+#    Parameters:
+#        previous_frame (Optional[Frame]): The previous Frame to show in the uncovered region.
+#        If None, black will be used for empty areas.
+#        reveal_fraction (float): Fraction of the frame height revealed (0.0 to 1.0).
+#        field (Optional[Field]): Field overlay mask, default to FOverlay() if None.
+#
+
+    apply(pixels: np.ndarray) -> np.ndarray:
+#
+#    Apply the partial frame reveal effect only.
+#
+#    Parameters:
+#        pixels (np.ndarray): The current frame pixel data.
+#
+#    Returns:
+#        np.ndarray: The pixel data with partial reveal effect applied.
+#
+
+class SideOffsetFilter(Filter):
+#A filter that offsets lines of pixels based on an angle (0-360 degrees),
+#wrapping pixels that are pushed off-screen around to the opposite side.
+#
+#The offset values array length will be resampled via interpolation to match frame height (for mostly vertical shifts)
+#or frame width (for mostly horizontal shifts) depending on the angle.
+#
+#Angles:
+#- 0 or 360 degrees: offset horizontally to the right (like side=2 Right).
+#- 90 degrees: offset vertically downward (like side=3 Bottom).
+#- 180 degrees: offset horizontally to the left (like side=0 Left).
+#- 270 degrees: offset vertically upward (like side=1 Top).
+#- Intermediate angles interpolate offsets in both directions proportionally.
+#The offset is applied along a vector line rotated by the angle, with values along that line.
+#
+
+    __init__(values: np.ndarray, angle: float, blend_width: int = 10, field: Optional[Field] = None) -> None:
+#
+#    Initialize the SideOffsetFilter with angle-based offset.
+#
+#    Args:
+#    values (np.ndarray): 1D array of floats in [0,1] representing offset magnitude.
+#    These represent offset values along a line (like a waveform) that will be rotated by the angle.
+#    angle (float): Offset angle in degrees [0-360).
+#    blend_width (int): Width in pixels over which to blend edges.
+#    field (Optional[Field]): Field for masking. Defaults to FOverlay() if None.
+#
+
+    apply(pixels: np.ndarray) -> np.ndarray:
+#
+#    Apply the offset effect by treating the values as a line along the rotated axis,
+#    offsetting pixels in the direction of the angle accordingly with wrapping and blending.
+#
+#    Args:
+#    pixels (np.ndarray): Input image pixels as (H, W, 3) uint8 array.
+#
+#    Returns:
+#        np.ndarray: Offset pixels blended with original using self._map mask.
+#
 

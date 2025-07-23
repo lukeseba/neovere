@@ -1,4 +1,3 @@
-import numpy as np
 import subprocess
 import os
 import sys
@@ -16,6 +15,8 @@ import string
 import random
 from typing import List, Tuple
 import re
+import pickle
+
 
 
 try:
@@ -30,5 +31,13 @@ _paths = [%$#path#$%]
 arial = "[%$#arial#$%]"
 
 api_key = "" #[%$# #$%]
+gpu_enabled = False #[%%# #$%]
 
 audio_counter = 0
+
+if gpu_enabled:
+    import cupy as np
+else:
+    import numpy as np
+
+import numpy as rnp

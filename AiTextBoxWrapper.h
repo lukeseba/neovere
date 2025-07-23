@@ -232,7 +232,7 @@ private slots:
         messages.append(userMsg);
 
         QJsonObject json;
-        json["model"] = "gpt-4.1-nano";
+        json["model"] = "gpt-4.1-mini";
         json["messages"] = messages;
         json["temperature"] = 1;
 

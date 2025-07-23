@@ -27,6 +27,7 @@
 #include <QTimer>
 #include <QMessageBox>
 #include <QInputDialog>
+#include <QCheckBox>
 
 #include <QUrl>
 #include <opencv2/opencv.hpp>
@@ -274,13 +275,21 @@ void remakeNeoverePy(QStringList &mediaPath) {
         }
     }
 
-    QString openaiKey = readFromFile("openai_key.txt");
+    QString openaiKey = "";
+    QString gpuEnabled = "False";
 
-    fileString.replace("%$#path#$%", allPaths);
-    fileString.replace("[%$#arial#$%]", exportFontResourceToFile(":/resources/fonts/arial-bold.ttf"));
-    fileString.replace("api_key = \"\" #[%$# #$%]", "api_key = \"" + openaiKey +"\"");
-    outFile << fileString.toStdString();
-    outFile.close();
+    QStringList settings = readFromFile("settings.txt").split("\n");
+
+    if (settings.length() > 0) {
+        openaiKey = settings.at(0);
+        gpuEnabled = settings.at(1) == "1" ? "True" : "False";
+    }
+        fileString.replace("%$#path#$%", allPaths);
+        fileString.replace("[%$#arial#$%]", exportFontResourceToFile(":/resources/fonts/arial-bold.ttf"));
+        fileString.replace("api_key = \"\" #[%$# #$%]", "api_key = \"" + openaiKey +"\"");
+        fileString.replace("gpu_enabled = False #[%%# #$%]", "gpu_enabled = "+gpuEnabled);
+        outFile << fileString.toStdString();
+        outFile.close();
 }
 
 void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * mediaHeader, MediaFrame * mediaPanel) {
@@ -772,14 +781,11 @@ int main(int argc, char *argv[]) {
     QString currentVideo = "";
     QString currentFile = "";
     QString openaiKey;
-    QFile keyFile("openai_key.txt");
-    if (keyFile.exists() && keyFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        QTextStream in(&keyFile);
-        openaiKey = in.readLine().trimmed(); // Read and trim the key
-        keyFile.close();
-    } else {
-        openaiKey = "";
+    QStringList settings = readFromFile("settings.txt").split("\n");
+    if (settings.length() > 0) {
+        openaiKey = settings.at(0);
     }
+    
 
 
     // Main window widget
@@ -807,22 +813,22 @@ int main(int argc, char *argv[]) {
     QVBoxLayout *leftLayout = new QVBoxLayout;
 
     // Create top buttons
+    QPushButton *settingsButton = new QPushButton("S E T T I N G S");
     QPushButton *openButton = new QPushButton("O P E N");
     QPushButton *newButton = new QPushButton("N E W");
     QPushButton *saveButton = new QPushButton("S A V E");
-    QPushButton *aiButton = new QPushButton("A I");
     QPushButton *exportButton = new QPushButton("E X P O R T");
     openButton->setFont(sftel_bold);
     newButton->setFont(sftel_bold);
     saveButton->setFont(sftel_bold);
-    aiButton->setFont(sftel_bold);
+    settingsButton->setFont(sftel_bold);
     exportButton->setFont(sftel_bold);
 
     QHBoxLayout *topButtonLayout = new QHBoxLayout();
+    topButtonLayout->addWidget(settingsButton);
     topButtonLayout->addWidget(openButton);
     topButtonLayout->addWidget(newButton);
     topButtonLayout->addWidget(saveButton);
-    topButtonLayout->addWidget(aiButton);
     topButtonLayout->addWidget(exportButton);
     QWidget *topButtonWidget = new QWidget();
     topButtonWidget->setLayout(topButtonLayout);
@@ -1144,7 +1150,7 @@ int main(int argc, char *argv[]) {
 
 
     // make the new button open a new default file
-    QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay, mediaHeader]() {
+    QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay, mediaHeader, &currentFile]() {
         QMessageBox confirmationDialog;
         confirmationDialog.setWindowTitle("Confirm New Program");
         confirmationDialog.setText("Are you sure you want to create a new program? Unsaved changes will be lost.");
@@ -1153,6 +1159,7 @@ int main(int argc, char *argv[]) {
 
         if (confirmationDialog.exec() == QMessageBox::Yes) {
             createNewFile(codePanel, outputDisplay, mediaHeader);
+            currentFile = "";
         }
     });
 
@@ -1164,38 +1171,71 @@ int main(int argc, char *argv[]) {
         currentFile = saveProjectToFile(programs, mediaPath, outputDisplay);
     });
 
-    QObject::connect(aiButton, &QPushButton::clicked, [&openaiKey]() {
+    QObject::connect(settingsButton, &QPushButton::clicked, [&openaiKey, &mediaPath]() {
         // Load current key from file if it exists
         QString currentKey;
-        QFile file("openai_key.txt");
-        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QTextStream in(&file);
+        bool currentGpuEnabled = false;
+        QFile settingsFile("settings.txt");
+        if (settingsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&settingsFile);
             currentKey = in.readLine().trimmed();
-            file.close();
+            currentGpuEnabled = in.readLine().trimmed().toInt();
+            settingsFile.close();
         }
 
-        bool ok;
-        QString key = QInputDialog::getText(nullptr,
-                                            "Set OpenAI API Key",
-                                            "Enter your OpenAI API key:",
-                                            QLineEdit::Normal,
-                                            currentKey,  // pre-fill with current key
-                                            &ok);
+        // Create a dialog manually to allow more complex input
+        QDialog dialog;
+        dialog.setWindowTitle("Settings");
 
-        if (ok && !key.isEmpty()) {
+        QVBoxLayout* layout = new QVBoxLayout(&dialog);
+
+        QLineEdit* keyInput = new QLineEdit(currentKey);
+        keyInput->setEchoMode(QLineEdit::Normal);
+        layout->addWidget(new QLabel("Enter your OpenAI API key:"));
+        layout->addWidget(keyInput);
+
+        QCheckBox* gpuCheckbox = new QCheckBox("Enable GPU acceleration");
+        layout->addWidget(gpuCheckbox);
+        gpuCheckbox->setChecked(currentGpuEnabled);
+
+        QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        layout->addWidget(buttonBox);
+
+        QObject::connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        QObject::connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+        if (dialog.exec() == QDialog::Accepted) {
+            QString key = keyInput->text().trimmed();
+            bool gpuEnabled = gpuCheckbox->isChecked();
+
             openaiKey = key;
 
-            QFile outFile("openai_key.txt");
+            QFile outFile("settings.txt");
             if (outFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
                 QTextStream out(&outFile);
                 out << openaiKey;
+                out << "\n";
+                out << gpuEnabled;
                 outFile.close();
-                QMessageBox::information(nullptr, "Success", "API key saved successfully.");
             } else {
-                QMessageBox::critical(nullptr, "Error", "Failed to save API key.");
+                QMessageBox::critical(nullptr, "Error", "Failed to save settings.");
             }
+
+            QFile gpuOutFile("use_gpu.txt");
+            if (gpuOutFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&gpuOutFile);
+                out << (gpuEnabled ? "1" : "0");
+                gpuOutFile.close();
+            } else {
+                QMessageBox::critical(nullptr, "Error", "Failed to save GPU setting.");
+            }
+
+            remakeNeoverePy(mediaPath);
+
+            QMessageBox::information(nullptr, "Success", "Settings saved successfully.");
         }
     });
+
 
     // change from media to command tabs
     QObject::connect(rightSideTabs, &TabsWidget::tabSelected, [rightStack](int index) {

@@ -179,7 +179,10 @@ class Frame:
             title (str): The window title for the preview.
         """
         window_name = title
-        cv2.imshow(window_name, self._pixels)
+        if gpu_enabled:
+            cv2.imshow(window_name, np.asnumpy(self._pixels))
+        else:
+            cv2.imshow(window_name, self._pixels)
         if wait_for_exit:
             while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
                 if cv2.waitKey(100) & 0xFF == ord('q'):
@@ -329,6 +332,8 @@ class Video:
         # Read the frame
         ret, frame = self.__video.read()
         if ret:
+            if gpu_enabled:
+                frame = np.asarray(frame)
             if h is None and w != 1.0:
                 frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
             elif h is not None:
@@ -445,14 +450,6 @@ class Audio:
             raise ValueError("Unsupported file type. Supported types are: mp4, mp3, wav.")
 
     def _get_fps(self) -> float:
-        """Extract the frames per second (FPS) from a video file using FFmpeg.
-
-        Returns:
-            float: The FPS value extracted from the video.
-
-        Raises:
-            ValueError: If FFmpeg fails to retrieve valid FPS information.
-        """
         command = [
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
@@ -460,10 +457,18 @@ class Audio:
             "-of", "csv=p=0",
             self._file_path
         ]
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
         fps_data = result.stdout.strip()
-        num, denom = map(int, fps_data.split('/'))
-        return num / denom
+
+        try:
+            num, denom = map(int, fps_data.split('/'))
+            fps = num / denom
+            if fps <= 0:
+                raise ValueError
+            return fps
+        except Exception:
+            raise ValueError(f"[Error] Could not extract FPS from video file: {fps_data}")
+
 
     def _extract_full_audio(self) -> str:
         """Extract the full audio content into a WAV file using FFmpeg.
@@ -488,7 +493,7 @@ class Audio:
             output_audio
         ]
         command = [arg for arg in command if arg]
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
 
         if result.returncode != 0:
             print("FFmpeg Error:", result.stderr)
@@ -509,21 +514,45 @@ class Audio:
             ValueError: If the audio data is empty or invalid.
         """
         audio_path = self._extract_full_audio()
-        sample_rate, audio_data = wavfile.read(audio_path)
+
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(f"Extracted audio file not found: {audio_path}")
+
+        try:
+            sample_rate, audio_data = wavfile.read(audio_path)
+        except Exception as e:
+            raise RuntimeError(f"[Error] Failed to read WAV file '{audio_path}': {e}")
+
+        if self._file_type != "wav":
+            try:
+                os.remove(audio_path)
+            except Exception as e:
+                print(f"[Warning] Failed to remove temporary audio file: {e}")
+
+        if audio_data.size == 0:
+            raise ValueError("[Error] Audio data is empty. The video may not have a valid audio track.")
+
+        # Convert stereo to mono
+        if audio_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+
+        # Normalize audio depending on its dtype
+        if audio_data.dtype == np.int16:
+            audio_data = audio_data.astype(np.float32) / 32768.0
+        elif audio_data.dtype == np.int32:
+            audio_data = audio_data.astype(np.float32) / 2147483648.0
+        elif np.issubdtype(audio_data.dtype, np.floating):
+            audio_data = np.clip(audio_data, -1.0, 1.0)
+        else:
+            raise TypeError(f"[Error] Unsupported audio dtype: {audio_data.dtype}")
 
         self._sample_rate = sample_rate
         self._duration = len(audio_data) / sample_rate
 
-        if self._file_type != "wav":
-            os.remove(audio_path)
-
-        if audio_data.dtype == np.int16:
-            audio_data = audio_data / 32768.0
-
-        if len(audio_data) == 0:
-            raise ValueError("Audio data is empty. Check the input file for a valid audio track.")
-
+        print(f"[Info] Loaded audio: sample_rate={sample_rate}, duration={self._duration:.2f}s, dtype={audio_data.dtype}")
         return audio_data
+
+
 
     def _get_duration(self) -> float:
         """Calculate the duration of the audio file.
@@ -566,7 +595,8 @@ class Audio:
         cache_file = f"AudioCache/{self._encode_cache_name(self._file_path)}.npy"
 
         if os.path.isfile(cache_file) and not reload:
-            full_audio_data = np.load(cache_file, allow_pickle=True)
+            full_audio_data = rnp.load(cache_file, allow_pickle=True)
+
             self._audio_data = full_audio_data[:-1]
             self._sample_rate = full_audio_data[-1]["sample rate"]
             self._duration = full_audio_data[-1]["duration"]
@@ -596,7 +626,7 @@ class Audio:
                 xf = fftfreq(len(frame_audio), 1 / self._sample_rate)
 
                 positive_frequencies = xf[:len(yf) // 2]
-                magnitude = np.abs(yf[:len(yf) // 2])
+                magnitude = rnp.abs(yf[:len(yf) // 2])
 
                 self._audio_data.append({
                     "volume": volume,
@@ -608,10 +638,10 @@ class Audio:
                 "duration": self._duration,
                 "sample rate": self._sample_rate
             })
-
-            np.save(cache_file, self._audio_data)
+            rnp.save(cache_file, self._audio_data)
 
         self._loaded = True
+
 
     def frame_audio(self, frame_index: int) -> FrameAudio:
         """Retrieve audio data corresponding to a specific frame.
@@ -642,7 +672,7 @@ class Audio:
         Returns:
             float: Total duration of the audio file.
         """
-        if not self._audio_data:
+        if not self._audio_data.all():
             self._load_audio_data()
 
         audio_path = self._extract_full_audio()
@@ -730,7 +760,10 @@ class NonlinearRenderer:
             )
 
         self.__frame_indices.append(frame_index)
-        self.__unordered_writer.write(new_frame.get_pixels(True))
+        write_pixels = new_frame.get_pixels(True)
+        if gpu_enabled:
+            write_pixels = np.asnumpy(write_pixels)
+        self.__unordered_writer.write(write_pixels)
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
 
     def attach_audio(self, audio: 'Audio', volume: float = 1.0) -> None:
@@ -847,9 +880,11 @@ class NonlinearRenderer:
                 unordered_render.set(cv2.CAP_PROP_POS_FRAMES, unordered_idx)
                 ret, frame = unordered_render.read()
                 if ret:
-                    if preview:
-                        Frame(frame).preview()
                     ordered_writer.write(frame)
+                    if preview:
+                        if gpu_enabled:
+                            frame = np.asarray(frame)
+                        Frame(frame).preview()
                 else:
                     raise ValueError(f"Could not read frame {frame_index}.")
 
