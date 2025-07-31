@@ -197,6 +197,7 @@ void SearchTextEdit::setColor(const QColor& color) {
         "    border: 2px solid %1;"
         "    border-radius: 4px;"
         "    padding: 2px;"
+        "    background-color: white;"
         "}"
         "QPlainTextEdit:focus {"
         "    border: 2px solid %2;"

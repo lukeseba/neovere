@@ -43,6 +43,7 @@ public:
             "    border: 1px solid #ddd;"
             "    border-radius: 3px;"
             "    padding: 5px;"
+            "    color: black"
             "}"
         );
         secondaryTextEdit->setPlaceholderText("Enter your prompt for AI...");
@@ -110,6 +111,8 @@ public:
             "    border: 2px solid %1;"
             "    border-radius: 4px;"
             "    padding: 2px;"
+            "    background-color: white;"
+            "    color: black"
             "}"
             "QPlainTextEdit:focus {"
             "    border: 2px solid %2;"

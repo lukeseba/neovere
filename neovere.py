@@ -28,10 +28,10 @@ except ImportError:
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
 _paths = ["render.mp4"]
-arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
+arial = "/tmp/arial-bold.ttf"
 
 api_key = "" #[%$# #$%]
-gpu_enabled = False
+gpu_enabled = True
 
 audio_counter = 0
 
