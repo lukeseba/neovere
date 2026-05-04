@@ -315,7 +315,7 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
     // Set up environment
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     process->setProcessEnvironment(env);
-    QString pythonExecutable = "python"; // Adjust for Windows if needed
+    QString pythonExecutable = "python3"; // Adjust for Windows if needed
 
     // Connect process output signals
     QObject::connect(process, &QProcess::readyReadStandardOutput, [outputDisplay]() {

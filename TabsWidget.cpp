@@ -20,7 +20,7 @@ TabsWidget::TabsWidget(bool includeLabel, bool buttonStyleTabs, QWidget *parent)
         nameLabel = new QLineEdit(mainWidget);
         nameLabel->setAlignment(Qt::AlignCenter);
         nameLabel->setReadOnly(true);
-        nameLabel->setStyleSheet("QLineEdit{ background-color: none;  color: black; border: 0px;}"
+        nameLabel->setStyleSheet("QLineEdit{ background-color: transparent;  color: black; border: 0px;}"
                                             );
     }
 
