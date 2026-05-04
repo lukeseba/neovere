@@ -293,17 +293,26 @@ class Video:
             cache_path = f"{cache_dir}/{safe_name}_dx{dx}.mp4"
             if not os.path.isfile(cache_path):
                 print(f"[preview] Downscaling {video_path} -> {self.__width}x{self.__height} (one-time, cached)...")
-                result = subprocess.run([
-                    "ffmpeg", "-y", "-i", video_path,
-                    "-vf", f"scale={self.__width}:{self.__height}:flags=neighbor",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                    "-an",
-                    cache_path
-                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if result.returncode != 0:
-                    print("[preview] ffmpeg downscale failed; falling back to in-process resize.")
+                # Try Apple's hardware H.264 encoder first; fall back to libx264 on any other platform.
+                encoders_to_try = [
+                    ["-c:v", "h264_videotoolbox", "-b:v", "8M"],
+                    ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"],
+                ]
+                result = None
+                for enc_args in encoders_to_try:
+                    result = subprocess.run([
+                        "ffmpeg", "-y", "-i", video_path,
+                        "-vf", f"scale={self.__width}:{self.__height}:flags=neighbor",
+                        *enc_args,
+                        "-an",
+                        cache_path
+                    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if result.returncode == 0:
+                        break
                     if os.path.isfile(cache_path):
                         os.remove(cache_path)
+                if result is None or result.returncode != 0:
+                    print("[preview] ffmpeg downscale failed; falling back to in-process resize.")
             if os.path.isfile(cache_path):
                 self.__video_path = cache_path
                 self.__pre_scaled = True
@@ -786,6 +795,8 @@ class NonlinearRenderer:
         )
         self.__max_frame_index = -1
         self.__audios: List[tuple['Audio', float]] = []
+        self.__in_order = True
+        self.__expected_next = 0
 
     def set_frame(self, frame_index: int, new_frame: 'Frame') -> None:
         """Set a frame at a specific index for the output video.
@@ -810,6 +821,11 @@ class NonlinearRenderer:
             write_pixels = np.asnumpy(write_pixels)
         self.__unordered_writer.write(write_pixels)
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
+
+        # Track whether frames were appended sequentially (0, 1, 2, ...) with no gaps
+        if frame_index != self.__expected_next:
+            self.__in_order = False
+        self.__expected_next = max(self.__expected_next, frame_index + 1)
 
     def attach_audio(self, audio: 'Audio', volume: float = 1.0) -> None:
         """Attach an Audio object to the renderer with a specified volume adjustment.
@@ -908,33 +924,42 @@ class NonlinearRenderer:
             ValueError: If frames cannot be read during rendering.
         """
         self.__unordered_writer.release()
-        ordered_writer = cv2.VideoWriter(
-            "silent_render.mp4",
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            self.__fps,
-            (self.__width, self.__height)
-        )
-        unordered_render = cv2.VideoCapture("unordered_render.mp4")
 
-        for frame_index in range(self.__max_frame_index + 1):
-            unordered_idx = self.__get_unordered_frame_idx(frame_index)
-            if unordered_idx == -1:
-                blank_frame = cv2.UMat(self.__height, self.__width, cv2.CV_8UC3, [0, 0, 0])
-                ordered_writer.write(blank_frame)
-            else:
-                unordered_render.set(cv2.CAP_PROP_POS_FRAMES, unordered_idx)
-                ret, frame = unordered_render.read()
-                if ret:
-                    ordered_writer.write(frame)
-                    if preview:
-                        if gpu_enabled:
-                            frame = np.asarray(frame)
-                        Frame(frame).preview()
+        # Fast path: frames were already appended sequentially with no gaps
+        # and there's no need to preview each frame during the reorder pass.
+        no_gaps = self.__expected_next == self.__max_frame_index + 1
+        if self.__in_order and no_gaps and not preview:
+            if os.path.exists("silent_render.mp4"):
+                os.remove("silent_render.mp4")
+            os.rename("unordered_render.mp4", "silent_render.mp4")
+        else:
+            ordered_writer = cv2.VideoWriter(
+                "silent_render.mp4",
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                self.__fps,
+                (self.__width, self.__height)
+            )
+            unordered_render = cv2.VideoCapture("unordered_render.mp4")
+
+            for frame_index in range(self.__max_frame_index + 1):
+                unordered_idx = self.__get_unordered_frame_idx(frame_index)
+                if unordered_idx == -1:
+                    blank_frame = cv2.UMat(self.__height, self.__width, cv2.CV_8UC3, [0, 0, 0])
+                    ordered_writer.write(blank_frame)
                 else:
-                    raise ValueError(f"Could not read frame {frame_index}.")
+                    unordered_render.set(cv2.CAP_PROP_POS_FRAMES, unordered_idx)
+                    ret, frame = unordered_render.read()
+                    if ret:
+                        ordered_writer.write(frame)
+                        if preview:
+                            if gpu_enabled:
+                                frame = np.asarray(frame)
+                            Frame(frame).preview()
+                    else:
+                        raise ValueError(f"Could not read frame {frame_index}.")
 
-        unordered_render.release()
-        ordered_writer.release()
+            unordered_render.release()
+            ordered_writer.release()
 
         if self.__audios:
             self.__attach_audios("silent_render.mp4", self.__audios, "render.mp4")
