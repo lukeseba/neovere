@@ -176,6 +176,12 @@ private slots:
     }
 
     void generateAiResponse() {
+        // Re-read key fresh from settings.txt so changes in the Settings dialog take effect immediately
+        QStringList settingsLines = readFromFile("settings.txt").split("\n");
+        if (!settingsLines.isEmpty()) {
+            openAiKey = settingsLines.at(0).trimmed();
+        }
+
         if (openAiKey.isEmpty()) {
             originalTextEdit->appendPlainText("\n[Error: OpenAI API key not configured]");
             return;

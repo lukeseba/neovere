@@ -32,6 +32,8 @@ arial = "[%$#arial#$%]"
 
 api_key = "" #[%$# #$%]
 gpu_enabled = False #[%%# #$%]
+dx = 1.0 #[%$#dx#$%]
+dt = 1.0 #[%$#dt#$%]
 
 audio_counter = 0
 

@@ -13,6 +13,7 @@
 #include <QPlainTextEdit>
 #include <QLineEdit>
 #include <QStackedWidget>
+#include <QComboBox>
 #include <QRegularExpression>
 
 #include <QFontDatabase>
@@ -277,6 +278,8 @@ void remakeNeoverePy(QStringList &mediaPath) {
 
     QString openaiKey = "";
     QString gpuEnabled = "False";
+    QString dxValue = "1.0";
+    QString dtValue = "1.0";
 
     QStringList settings = readFromFile("settings.txt").split("\n");
 
@@ -286,10 +289,18 @@ void remakeNeoverePy(QStringList &mediaPath) {
     if (settings.length() > 1) {
         gpuEnabled = settings.at(1) == "1" ? "True" : "False";
     }
+    if (settings.length() > 3 && !settings.at(3).trimmed().isEmpty()) {
+        dxValue = settings.at(3).trimmed();
+    }
+    if (settings.length() > 4 && !settings.at(4).trimmed().isEmpty()) {
+        dtValue = settings.at(4).trimmed();
+    }
         fileString.replace("%$#path#$%", allPaths);
         fileString.replace("[%$#arial#$%]", exportFontResourceToFile(":/resources/fonts/arial-bold.ttf"));
         fileString.replace("api_key = \"\" #[%$# #$%]", "api_key = \"" + openaiKey +"\"");
         fileString.replace("gpu_enabled = False #[%%# #$%]", "gpu_enabled = "+gpuEnabled);
+        fileString.replace("dx = 1.0 #[%$#dx#$%]", "dx = " + dxValue);
+        fileString.replace("dt = 1.0 #[%$#dt#$%]", "dt = " + dtValue);
         outFile << fileString.toStdString();
         outFile.close();
 }
@@ -796,7 +807,7 @@ int main(int argc, char *argv[]) {
         QFile defaultSettings("settings.txt");
         if (defaultSettings.open(QIODevice::WriteOnly | QIODevice::Text)) {
             QTextStream out(&defaultSettings);
-            out << "\n0\n";
+            out << "\n0\n\n1.0\n1.0\n";
             defaultSettings.close();
         }
     }
@@ -1202,7 +1213,7 @@ int main(int argc, char *argv[]) {
         updateTitle();
     });
 
-    QObject::connect(exportButton, &QPushButton::clicked, [&window, codePanel, outputDisplay, mediaHeader, mediaPanel]() {
+    QObject::connect(exportButton, &QPushButton::clicked, [&window, codePanel, outputDisplay, mediaHeader, mediaPanel, &mediaPath]() {
         QString destPath = QFileDialog::getSaveFileName(&window, "Export Render", "render.mp4", "MP4 Video (*.mp4)");
         if (destPath.isEmpty()) return;
 
@@ -1231,10 +1242,33 @@ int main(int argc, char *argv[]) {
         if (choice.clickedButton() == useLastBtn) {
             copyOver();
         } else if (choice.clickedButton() == rerenderBtn) {
+            // Save original settings, force dx=dt=1.0 for export, regenerate neovere.py
+            QString originalSettings = readFromFile("settings.txt");
+            QStringList lines = originalSettings.split("\n");
+            while (lines.size() < 5) lines.append("");
+            lines[3] = "1.0";
+            lines[4] = "1.0";
+            QFile sf("settings.txt");
+            if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&sf);
+                out << lines.join("\n");
+                sf.close();
+            }
+            remakeNeoverePy(mediaPath);
+
             QString code = codePanel->toPlainText();
             compileCode(code, outputDisplay, mediaHeader, mediaPanel);
             QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                &window, [copyOver, outputDisplay](int exitCode, QProcess::ExitStatus) {
+                &window, [copyOver, outputDisplay, originalSettings, &mediaPath](int exitCode, QProcess::ExitStatus) {
+                    // Restore preview settings
+                    QFile sf("settings.txt");
+                    if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                        QTextStream out(&sf);
+                        out << originalSettings;
+                        sf.close();
+                    }
+                    remakeNeoverePy(mediaPath);
+
                     if (exitCode == 0) {
                         copyOver();
                     } else {
@@ -1249,12 +1283,18 @@ int main(int argc, char *argv[]) {
         QString currentKey;
         bool currentGpuEnabled = false;
         QString currentPythonPath;
+        QString currentDx = "1.0";
+        QString currentDt = "1.0";
         QFile settingsFile("settings.txt");
         if (settingsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
             QTextStream in(&settingsFile);
             currentKey = in.readLine().trimmed();
             currentGpuEnabled = in.readLine().trimmed().toInt();
             currentPythonPath = in.readLine().trimmed();
+            QString dxLine = in.readLine().trimmed();
+            QString dtLine = in.readLine().trimmed();
+            if (!dxLine.isEmpty()) currentDx = dxLine;
+            if (!dtLine.isEmpty()) currentDt = dtLine;
             settingsFile.close();
         }
 
@@ -1278,6 +1318,26 @@ int main(int argc, char *argv[]) {
         layout->addWidget(new QLabel("Python interpreter path (leave blank for auto-detect):"));
         layout->addWidget(pythonPathInput);
 
+        layout->addWidget(new QLabel("Preview resolution scale (dx):"));
+        QComboBox* dxCombo = new QComboBox();
+        dxCombo->addItem("Full (1.0)", "1.0");
+        dxCombo->addItem("Half (0.5)", "0.5");
+        dxCombo->addItem("Quarter (0.25)", "0.25");
+        for (int i = 0; i < dxCombo->count(); ++i) {
+            if (dxCombo->itemData(i).toString() == currentDx) { dxCombo->setCurrentIndex(i); break; }
+        }
+        layout->addWidget(dxCombo);
+
+        layout->addWidget(new QLabel("Preview fps scale (dt):"));
+        QComboBox* dtCombo = new QComboBox();
+        dtCombo->addItem("Full (1.0)", "1.0");
+        dtCombo->addItem("Half (0.5)", "0.5");
+        dtCombo->addItem("Quarter (0.25)", "0.25");
+        for (int i = 0; i < dtCombo->count(); ++i) {
+            if (dtCombo->itemData(i).toString() == currentDt) { dtCombo->setCurrentIndex(i); break; }
+        }
+        layout->addWidget(dtCombo);
+
         QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
         layout->addWidget(buttonBox);
 
@@ -1288,6 +1348,8 @@ int main(int argc, char *argv[]) {
             QString key = keyInput->text().trimmed();
             bool gpuEnabled = gpuCheckbox->isChecked();
             QString pythonPath = pythonPathInput->text().trimmed();
+            QString dxValue = dxCombo->currentData().toString();
+            QString dtValue = dtCombo->currentData().toString();
 
             openaiKey = key;
 
@@ -1299,6 +1361,10 @@ int main(int argc, char *argv[]) {
                 out << gpuEnabled;
                 out << "\n";
                 out << pythonPath;
+                out << "\n";
+                out << dxValue;
+                out << "\n";
+                out << dtValue;
                 outFile.close();
             } else {
                 QMessageBox::critical(nullptr, "Error", "Failed to save settings.");

@@ -263,23 +263,57 @@ class Video:
         Raises:
             SystemExit: If the video file cannot be opened, exits the program.
         """
+        self.__original_path = video_path
         self.__video_path = video_path
+        self.__pre_scaled = False
+
+        # Probe source metadata (always from the original file)
+        probe = cv2.VideoCapture(video_path)
+        if not probe.isOpened():
+            print("Error: Could not open video file.")
+            print(video_path)
+            exit()
+        self.__source_fps = probe.get(cv2.CAP_PROP_FPS)
+        self.__source_frame_count = int(probe.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.__source_width = int(probe.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.__source_height = int(probe.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        probe.release()
+
+        self.__fps = self.__source_fps * dt
+        self.__frame_duration = max(1, int(self.__source_frame_count * dt))
+        self.__width = max(1, int(self.__source_width * dx))
+        self.__height = max(1, int(self.__source_height * dx))
+
+        # If preview-scaled, transcode source to a smaller cached copy with
+        # nearest-neighbor (pixel decimation) — fast encode, fast decode.
+        if dx != 1.0:
+            cache_dir = "VideoCache"
+            os.makedirs(cache_dir, exist_ok=True)
+            safe_name = "".join(c if c.isalnum() else f"_{ord(c)}_" for c in video_path)
+            cache_path = f"{cache_dir}/{safe_name}_dx{dx}.mp4"
+            if not os.path.isfile(cache_path):
+                print(f"[preview] Downscaling {video_path} -> {self.__width}x{self.__height} (one-time, cached)...")
+                result = subprocess.run([
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vf", f"scale={self.__width}:{self.__height}:flags=neighbor",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-an",
+                    cache_path
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode != 0:
+                    print("[preview] ffmpeg downscale failed; falling back to in-process resize.")
+                    if os.path.isfile(cache_path):
+                        os.remove(cache_path)
+            if os.path.isfile(cache_path):
+                self.__video_path = cache_path
+                self.__pre_scaled = True
+
         self.open()
 
-        if not self.__video.isOpened():
-            print("Error: Could not open video file.")
-            print(self.__video_path)
-            exit()
-
-        self.__fps = self.__video.get(cv2.CAP_PROP_FPS)
-        self.__frame_duration = int(self.__video.get(cv2.CAP_PROP_FRAME_COUNT))  # Total number of frames
-        self.__width = int(self.__video.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.__height = int(self.__video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        # Check if the video has an audio stream
+        # Check if the video has an audio stream (always check original)
         self.audio = None
         if self._has_audio():
-            self.audio = Audio(self.__video_path)
+            self.audio = Audio(self.__original_path)
 
     def _has_audio(self):
         """Check if the video file has an audio stream using ffprobe.
@@ -289,7 +323,7 @@ class Video:
         """
         check_audio_command = [
             "ffprobe",
-            "-i", self.__video_path,
+            "-i", self.__original_path,
             "-show_streams",
             "-select_streams", "a",
             "-loglevel", "error"
@@ -326,14 +360,21 @@ class Video:
         if frame_index < 0 or frame_index >= self.__frame_duration:
             raise ValueError(f"Frame index {frame_index} is out of bounds (0 to {self.__frame_duration - 1}).")
 
-        # Set the frame position
-        self.__video.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        # Map scaled (preview) index to source index
+        if dt != 1.0:
+            source_idx = min(self.__source_frame_count - 1, int(round(frame_index / dt)))
+        else:
+            source_idx = frame_index
 
-        # Read the frame
+        self.__video.set(cv2.CAP_PROP_POS_FRAMES, source_idx)
+
         ret, frame = self.__video.read()
         if ret:
             if gpu_enabled:
                 frame = np.asarray(frame)
+            # Apply preview scale only if source isn't pre-scaled by ffmpeg
+            if dx != 1.0 and not self.__pre_scaled:
+                frame = cv2.resize(frame, (self.__width, self.__height))
             if h is None and w != 1.0:
                 frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
             elif h is not None:
@@ -410,7 +451,11 @@ class Video:
         Returns:
             FrameAudio: The corresponding audio frame for the specified video frame.
         """
-        return self.audio.frame_audio(index)
+        if dt != 1.0:
+            source_idx = min(self.__source_frame_count - 1, int(round(index / dt)))
+        else:
+            source_idx = index
+        return self.audio.frame_audio(source_idx)
 
 
 class Audio:
