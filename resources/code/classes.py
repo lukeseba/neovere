@@ -281,8 +281,9 @@ class Video:
 
         self.__fps = self.__source_fps * dt
         self.__frame_duration = max(1, int(self.__source_frame_count * dt))
-        self.__width = max(1, int(self.__source_width * dx))
-        self.__height = max(1, int(self.__source_height * dx))
+        # Round to even dimensions so they match what h264/ffmpeg produces
+        self.__width = max(2, (int(self.__source_width * dx) // 2) * 2)
+        self.__height = max(2, (int(self.__source_height * dx) // 2) * 2)
 
         # If preview-scaled, transcode source to a smaller cached copy with
         # nearest-neighbor (pixel decimation) — fast encode, fast decode.
@@ -318,6 +319,9 @@ class Video:
                 self.__pre_scaled = True
 
         self.open()
+        # Tracks the next source frame index that cv2.read() will return.
+        # Used to decide between sequential read-forward vs. seek+decode.
+        self.__current_source_pos = 0
 
         # Check if the video has an audio stream (always check original)
         self.audio = None
@@ -375,9 +379,19 @@ class Video:
         else:
             source_idx = frame_index
 
-        self.__video.set(cv2.CAP_PROP_POS_FRAMES, source_idx)
-
-        ret, frame = self.__video.read()
+        # For small forward jumps, sequential read+discard is faster than seek+decode
+        # because seek pays a full keyframe-decode cost. For backward or large forward
+        # jumps, fall back to seek which is faster than re-reading huge ranges.
+        SEEK_THRESHOLD = 60
+        delta = source_idx - self.__current_source_pos
+        if 0 <= delta <= SEEK_THRESHOLD:
+            for _ in range(delta):
+                self.__video.read()
+            ret, frame = self.__video.read()
+        else:
+            self.__video.set(cv2.CAP_PROP_POS_FRAMES, source_idx)
+            ret, frame = self.__video.read()
+        self.__current_source_pos = source_idx + 1
         if ret:
             if gpu_enabled:
                 frame = np.asarray(frame)
@@ -925,13 +939,24 @@ class NonlinearRenderer:
         """
         self.__unordered_writer.release()
 
-        # Fast path: frames were already appended sequentially with no gaps
-        # and there's no need to preview each frame during the reorder pass.
+        # Fast path: frames were already appended sequentially with no gaps.
+        # No need to re-encode — just rename. If preview was requested, read
+        # the renamed file sequentially and call .preview() per frame (no write).
         no_gaps = self.__expected_next == self.__max_frame_index + 1
-        if self.__in_order and no_gaps and not preview:
+        if self.__in_order and no_gaps:
             if os.path.exists("silent_render.mp4"):
                 os.remove("silent_render.mp4")
             os.rename("unordered_render.mp4", "silent_render.mp4")
+            if preview:
+                cap = cv2.VideoCapture("silent_render.mp4")
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    if gpu_enabled:
+                        frame = np.asarray(frame)
+                    Frame(frame).preview()
+                cap.release()
         else:
             ordered_writer = cv2.VideoWriter(
                 "silent_render.mp4",

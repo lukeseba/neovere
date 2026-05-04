@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <regex>
+#include <functional>
 
 #include <QApplication>
 #include <QWidget>
@@ -49,6 +50,38 @@
 #include "TabsWidget.h"
 
 QProcess* process = nullptr;
+QProcess* pythonWorker = nullptr;
+QByteArray workerOutBuffer;
+std::function<void(bool)> workerOnFinished;
+static const char* WORKER_DONE_SENTINEL = "<<<NEO_DONE>>>";
+static const char* WORKER_SCRIPT = R"PYTHON(
+import sys, importlib
+END = "<<<NEO_DONE>>>"
+while True:
+    header = sys.stdin.readline()
+    if not header:
+        break
+    if not header.startswith("LEN:"):
+        continue
+    try:
+        n = int(header[4:].strip())
+    except ValueError:
+        continue
+    script = sys.stdin.read(n)
+    if 'neovere' in sys.modules:
+        try:
+            importlib.reload(sys.modules['neovere'])
+        except Exception as e:
+            print(f"[worker] reload failed: {e}")
+    try:
+        exec(script, {'__name__': '__main__'})
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    print(END, flush=True)
+)PYTHON";
 
 // convert a plural string to a singular string
 QString pluralToSingular(const QString& pluralWord) {
@@ -305,29 +338,7 @@ void remakeNeoverePy(QStringList &mediaPath) {
         outFile.close();
 }
 
-void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * mediaHeader, MediaFrame * mediaPanel) {
-    // Clean up any existing process
-    if (process != nullptr) {
-        if (process->state() == QProcess::Running) {
-            process->terminate();
-            if (!process->waitForFinished(3000)) {
-                process->kill();
-            }
-        }
-        delete process;
-        process = nullptr;
-    }
-
-    process = new QProcess();
-
-    outputDisplay->appendPlainText("Compiling video ...");
-
-    // Add import for neovere.py
-    QString fullCode = /*QString("import neovere\n") +*/ code;
-
-    // Set up environment
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    process->setProcessEnvironment(env);
+QString resolvePythonExecutable() {
     QString pythonExecutable = "python3";
     QStringList settings = readFromFile("settings.txt").split("\n");
     if (settings.length() > 2 && !settings.at(2).trimmed().isEmpty()) {
@@ -338,57 +349,88 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
             pythonExecutable = autoVenv;
         }
     }
+    return pythonExecutable;
+}
 
-    // Connect process output signals
-    QObject::connect(process, &QProcess::readyReadStandardOutput, [outputDisplay]() {
-        QString output = process->readAllStandardOutput();
-        outputDisplay->appendPlainText(output);
-    });
-
-    QObject::connect(process, &QProcess::readyReadStandardError, [outputDisplay]() {
-        QString error = process->readAllStandardError();
-        outputDisplay->appendPlainText("Error:\n" + error);
-    });
-
-    QObject::connect(process, &QProcess::errorOccurred, [outputDisplay](QProcess::ProcessError error) {
-        QString errorMsg;
-        switch (error) {
-            case QProcess::FailedToStart:
-                errorMsg = "Failed to start: The executable could not be found or is not executable.";
-                break;
-            case QProcess::Crashed:
-                errorMsg = "Crashed: The process crashed after starting.";
-                break;
-            case QProcess::Timedout:
-                errorMsg = "Timed out: The process timed out.";
-                break;
-            case QProcess::WriteError:
-                errorMsg = "Write error: Unable to write to the process.";
-                break;
-            case QProcess::ReadError:
-                errorMsg = "Read error: Unable to read from the process.";
-                break;
-            case QProcess::UnknownError:
-            default:
-                errorMsg = "Unknown error occurred.";
-                break;
-        }
-        outputDisplay->appendPlainText("Process error occurred: " + errorMsg);
-    });
-
-    // when process is finished show rendered tab
-    QObject::connect(process, &QProcess::finished, [mediaHeader, mediaPanel]() {
-        mediaHeader->selectTab(0);
-        mediaPanel->reloadVideo();
-    });
-
-    // Run the Python code
-    process->start(pythonExecutable, QStringList() << "-c" << fullCode);
-
-    // Check if the process starts successfully
-    if (!process->waitForStarted()) {
-        outputDisplay->appendPlainText("Failed to start process. Check your command and environment.");
+void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, MediaFrame* mediaPanel) {
+    if (pythonWorker) {
+        if (pythonWorker->state() == QProcess::Running) return;
+        delete pythonWorker;
+        pythonWorker = nullptr;
     }
+    workerOutBuffer.clear();
+
+    pythonWorker = new QProcess();
+    pythonWorker->setProcessEnvironment(QProcessEnvironment::systemEnvironment());
+
+    QObject::connect(pythonWorker, &QProcess::readyReadStandardOutput, [outputDisplay, mediaHeader, mediaPanel]() {
+        workerOutBuffer.append(pythonWorker->readAllStandardOutput());
+        int idx;
+        while ((idx = workerOutBuffer.indexOf('\n')) != -1) {
+            QByteArray line = workerOutBuffer.left(idx);
+            workerOutBuffer.remove(0, idx + 1);
+            // Trim trailing \r if present
+            if (!line.isEmpty() && line.endsWith('\r')) line.chop(1);
+
+            if (line == WORKER_DONE_SENTINEL) {
+                mediaHeader->selectTab(0);
+                mediaPanel->reloadVideo();
+                if (workerOnFinished) {
+                    auto cb = workerOnFinished;
+                    workerOnFinished = nullptr;
+                    cb(true);
+                }
+            } else {
+                outputDisplay->appendPlainText(QString::fromUtf8(line));
+            }
+        }
+    });
+
+    QObject::connect(pythonWorker, &QProcess::readyReadStandardError, [outputDisplay]() {
+        QString err = QString::fromUtf8(pythonWorker->readAllStandardError());
+        if (!err.isEmpty()) outputDisplay->appendPlainText(err.trimmed());
+    });
+
+    QObject::connect(pythonWorker, &QProcess::errorOccurred, [outputDisplay](QProcess::ProcessError error) {
+        outputDisplay->appendPlainText(QString("Worker process error: %1").arg(error));
+    });
+
+    QObject::connect(pythonWorker, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+        [outputDisplay](int exitCode, QProcess::ExitStatus) {
+            outputDisplay->appendPlainText(QString("Worker exited (code %1). It will be respawned on next render.").arg(exitCode));
+            if (workerOnFinished) {
+                auto cb = workerOnFinished;
+                workerOnFinished = nullptr;
+                cb(false);
+            }
+        });
+
+    pythonWorker->start(resolvePythonExecutable(), QStringList() << "-u" << "-c" << WORKER_SCRIPT);
+    if (!pythonWorker->waitForStarted(5000)) {
+        outputDisplay->appendPlainText("Failed to start Python worker. Check interpreter path in Settings.");
+    }
+}
+
+void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * mediaHeader, MediaFrame * mediaPanel) {
+    if (!pythonWorker || pythonWorker->state() != QProcess::Running) {
+        startPythonWorker(outputDisplay, mediaHeader, mediaPanel);
+    }
+    if (!pythonWorker || pythonWorker->state() != QProcess::Running) {
+        outputDisplay->appendPlainText("Cannot compile: worker not running.");
+        if (workerOnFinished) {
+            auto cb = workerOnFinished;
+            workerOnFinished = nullptr;
+            cb(false);
+        }
+        return;
+    }
+
+    outputDisplay->appendPlainText("Compiling video ...");
+
+    QByteArray scriptBytes = code.toUtf8();
+    QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
+    pythonWorker->write(header);
+    pythonWorker->write(scriptBytes);
 }
 
 void importMedia(QString fileName, QStringList &mediaPath, QPlainTextEdit *outputDisplay, TabsWidget *header) {
@@ -1258,24 +1300,23 @@ int main(int argc, char *argv[]) {
             remakeNeoverePy(mediaPath);
 
             QString code = codePanel->toPlainText();
-            compileCode(code, outputDisplay, mediaHeader, mediaPanel);
-            QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                &window, [copyOver, outputDisplay, originalSettings, &mediaPath](int exitCode, QProcess::ExitStatus) {
-                    // Restore preview settings
-                    QFile sf("settings.txt");
-                    if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                        QTextStream out(&sf);
-                        out << originalSettings;
-                        sf.close();
-                    }
-                    remakeNeoverePy(mediaPath);
+            workerOnFinished = [copyOver, outputDisplay, originalSettings, &mediaPath](bool success) {
+                // Restore preview settings
+                QFile sf("settings.txt");
+                if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                    QTextStream out(&sf);
+                    out << originalSettings;
+                    sf.close();
+                }
+                remakeNeoverePy(mediaPath);
 
-                    if (exitCode == 0) {
-                        copyOver();
-                    } else {
-                        outputDisplay->appendPlainText("Re-render failed; export aborted.");
-                    }
-                }, Qt::SingleShotConnection);
+                if (success) {
+                    copyOver();
+                } else {
+                    outputDisplay->appendPlainText("Re-render failed; export aborted.");
+                }
+            };
+            compileCode(code, outputDisplay, mediaHeader, mediaPanel);
         }
     });
 
@@ -1324,6 +1365,7 @@ int main(int argc, char *argv[]) {
         dxCombo->addItem("Full (1.0)", "1.0");
         dxCombo->addItem("Half (0.5)", "0.5");
         dxCombo->addItem("Quarter (0.25)", "0.25");
+        dxCombo->addItem("Eighth (0.125)", "0.125");
         for (int i = 0; i < dxCombo->count(); ++i) {
             if (dxCombo->itemData(i).toString() == currentDx) { dxCombo->setCurrentIndex(i); break; }
         }
@@ -1334,6 +1376,7 @@ int main(int argc, char *argv[]) {
         dtCombo->addItem("Full (1.0)", "1.0");
         dtCombo->addItem("Half (0.5)", "0.5");
         dtCombo->addItem("Quarter (0.25)", "0.25");
+        dtCombo->addItem("Eighth (0.125)", "0.125");
         for (int i = 0; i < dtCombo->count(); ++i) {
             if (dtCombo->itemData(i).toString() == currentDt) { dtCombo->setCurrentIndex(i); break; }
         }
