@@ -2,6 +2,14 @@ if len(_paths) != 0:
     class Filter:
         """A filter that aligns a Field object with the current renderer dimensions."""
 
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__(**kwargs)
+            original_init = cls.__init__
+            def profiled_init(self, *args, **kw):
+                with _profile(f"construct_filter:{cls.__name__}"):
+                    original_init(self, *args, **kw)
+            cls.__init__ = profiled_init
+
         def __init__(self, field: Optional[Field] = None) -> None:
             """Initialize a Filter instance.
 

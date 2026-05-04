@@ -1,5 +1,7 @@
 * class Field:
 
+    profiled_init(*args, **kw):
+
     __init__() -> None:
 #    Initialize a Field object with a blank, zero-filled map.
 #

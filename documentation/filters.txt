@@ -1,6 +1,8 @@
 * class Filter:
 #    A filter that aligns a Field object with the current renderer dimensions.
 
+    profiled_init(*args, **kw):
+
     __init__(field: Optional[Field] = None) -> None:
 #    Initialize a Filter instance.
 #

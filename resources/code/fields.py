@@ -1,5 +1,13 @@
 if len(_paths) != 0:
     class Field:
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__(**kwargs)
+            original_init = cls.__init__
+            def profiled_init(self, *args, **kw):
+                with _profile(f"construct_field:{cls.__name__}"):
+                    original_init(self, *args, **kw)
+            cls.__init__ = profiled_init
+
         def __init__(self) -> None:
             """Initialize a Field object with a blank, zero-filled map.
 
@@ -96,8 +104,13 @@ if len(_paths) != 0:
             Returns:
                 Field: A new Field with the result.
             """
-            clone = copy.deepcopy(self)
-            return clone.add(other)
+            with _profile("field.__add__"):
+                # Fast clone — Field only carries _map and inverted.
+                # copy.deepcopy is ~5-10x slower because it recursively traverses everything.
+                clone = self.__class__.__new__(self.__class__)
+                clone._map = self._map.copy()
+                clone.inverted = self.inverted
+                return clone.add(other)
 
         def __sub__(self, other: 'Field' or float) -> 'Field':
             """Return a new Field representing this - other.

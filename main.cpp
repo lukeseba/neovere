@@ -55,8 +55,9 @@ QByteArray workerOutBuffer;
 std::function<void(bool)> workerOnFinished;
 static const char* WORKER_DONE_SENTINEL = "<<<NEO_DONE>>>";
 static const char* WORKER_SCRIPT = R"PYTHON(
-import sys, importlib
+import sys, importlib, os
 END = "<<<NEO_DONE>>>"
+last_mtime = None
 while True:
     header = sys.stdin.readline()
     if not header:
@@ -68,16 +69,25 @@ while True:
     except ValueError:
         continue
     script = sys.stdin.read(n)
-    if 'neovere' in sys.modules:
+
+    # Reload neovere only when its file has actually changed since last render.
+    # Otherwise reuse the imported module (preserving in-memory state like Video frame caches).
+    if 'neovere' in sys.modules and last_mtime is not None:
         try:
-            importlib.reload(sys.modules['neovere'])
+            current_mtime = os.path.getmtime('neovere.py')
+            if current_mtime > last_mtime:
+                importlib.reload(sys.modules['neovere'])
         except Exception as e:
-            print(f"[worker] reload failed: {e}")
+            print(f"[worker] reload check failed: {e}")
     try:
         exec(script, {'__name__': '__main__'})
     except Exception:
         import traceback
         traceback.print_exc()
+    try:
+        last_mtime = os.path.getmtime('neovere.py')
+    except Exception:
+        pass
     sys.stdout.flush()
     sys.stderr.flush()
     print(END, flush=True)
@@ -963,6 +973,7 @@ int main(int argc, char *argv[]) {
     mediaHeader->setLabelFont(dotim7);
     importMedia("render.mp4", mediaPath, codePanel, mediaHeader);
     mediaHeader->getTab(0)->closeable = false;
+    mediaHeader->addTab("preview", "render.mp4", false);
 
 
     // create media panel
@@ -1474,7 +1485,7 @@ int main(int argc, char *argv[]) {
         QString setupScript =
             "/usr/bin/python3 -m venv ~/neovere_venv && "
             "~/neovere_venv/bin/pip install --upgrade pip && "
-            "~/neovere_venv/bin/pip install pillow opencv-python scipy librosa soundfile openai pyqt5 numpy";
+            "~/neovere_venv/bin/pip install pillow opencv-python scipy librosa soundfile openai pyqt5 numpy psutil";
 
         QObject::connect(setupProcess, &QProcess::readyReadStandardOutput, [setupProcess, outputDisplay]() {
             outputDisplay->appendPlainText(setupProcess->readAllStandardOutput().trimmed());

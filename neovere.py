@@ -33,7 +33,7 @@ arial = "/var/folders/r6/f9m8k8sd1b3840csp48x03bm0000gn/T/arial-bold.ttf"
 api_key = "" #[%$# #$%]
 gpu_enabled = False
 dx = 0.125
-dt = 0.125
+dt = 0.25
 
 audio_counter = 0
 
@@ -43,6 +43,39 @@ else:
     import numpy as np
 
 import numpy as rnp
+
+
+# ---------- Phase profiler ----------
+import time as _time
+from collections import defaultdict as _defaultdict
+from contextlib import contextmanager as _contextmanager
+
+_phase_totals = _defaultdict(float)
+_phase_counts = _defaultdict(int)
+
+@_contextmanager
+def _profile(name):
+    t = _time.perf_counter()
+    try:
+        yield
+    finally:
+        _phase_totals[name] += _time.perf_counter() - t
+        _phase_counts[name] += 1
+
+def _print_profile_summary():
+    if not _phase_totals:
+        return
+    total = sum(_phase_totals.values())
+    print("\n[profile] phase breakdown:")
+    print(f"  {'phase':<24} {'total(s)':>10} {'calls':>8} {'avg(ms)':>10} {'%':>6}")
+    for name in sorted(_phase_totals, key=lambda k: -_phase_totals[k]):
+        t = _phase_totals[name]
+        n = _phase_counts[name]
+        avg_ms = (t / n) * 1000 if n else 0
+        pct = (t / total) * 100 if total > 0 else 0
+        print(f"  {name:<24} {t:>10.3f} {n:>8} {avg_ms:>10.3f} {pct:>5.1f}%")
+    _phase_totals.clear()
+    _phase_counts.clear()
 
 
 from typing import Union
@@ -139,7 +172,8 @@ class Frame:
         Parameters:
             filter: A filter to apply to the frame
         """
-        self._pixels = filter.apply(self.get_pixels().astype(np.uint16)).astype(np.uint8)
+        with _profile(f"filter:{filter.__class__.__name__}"):
+            self._pixels = filter.apply(self.get_pixels().astype(np.uint16)).astype(np.uint8)
 
     def get_pixels(self, standard_size: bool = False) -> np.ndarray:
         """Return the frame's pixel data as a NumPy array.
@@ -151,9 +185,10 @@ class Frame:
             np.ndarray: The pixel data of the frame.
         """
         if standard_size:
-            return self._pixels.astype(np.uint8)
+            # astype with copy=False returns the same array when dtype already matches
+            return self._pixels.astype(np.uint8, copy=False)
         else:
-            return self._pixels.astype(np.uint16)
+            return self._pixels.astype(np.uint16, copy=False)
 
     def modify(self, func) -> None:
         """Apply a user-defined function to each pixel in the frame.
@@ -370,6 +405,15 @@ class Video:
         # Used to decide between sequential read-forward vs. seek+decode.
         self.__current_source_pos = 0
 
+        # In-memory frame cache for fast preview iteration. Only enabled
+        # when the user is in preview mode (dx < 1 or dt < 1). The RAM-aware
+        # format picker inside _prebuild_frame_cache decides between raw / jpeg
+        # / skip based on actual memory available.
+        self.__frame_cache = None
+        self.__cache_format = None
+        if dx < 1 or dt < 1:
+            self._prebuild_frame_cache()
+
         # Check if the video has an audio stream (always check original)
         self.audio = None
         if self._has_audio():
@@ -390,6 +434,67 @@ class Video:
         ]
         result = subprocess.run(check_audio_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return str(result.stdout) != ''
+
+    def _prebuild_frame_cache(self) -> None:
+        """Read every (scaled) frame into memory once for instant subsequent access.
+
+        Chooses raw numpy or JPEG-encoded storage based on available RAM.
+        """
+        import time
+        n = self.__frame_duration
+        raw_per_frame = self.__width * self.__height * 3
+        raw_total = n * raw_per_frame
+
+        # Detect available RAM (psutil is best-effort; fall back to a conservative guess)
+        try:
+            import psutil
+            free_ram = psutil.virtual_memory().available
+        except Exception:
+            try:
+                free_ram = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE') // 2
+            except Exception:
+                free_ram = 4 * 1024 ** 3  # 4 GB last-resort assumption
+
+        budget = int(free_ram * 0.5)  # don't take more than half of available RAM
+
+        # Pick storage format
+        if raw_total <= budget:
+            fmt = "raw"
+        elif raw_total // 8 <= budget:  # JPEG ~5-15× smaller; assume 8× to be safe
+            fmt = "jpeg"
+        else:
+            print(f"[preview] Cache would exceed RAM budget ({raw_total/1e9:.1f} GB raw, {budget/1e9:.1f} GB available). Skipping pre-cache.")
+            self.__cache_format = None
+            return
+
+        size_mb = raw_total / (1024*1024) if fmt == "raw" else (raw_total // 8) / (1024*1024)
+        print(f"[preview] Caching {n} frames of {self.__original_path} as {fmt} (~{size_mb:.0f} MB, free RAM {free_ram/1e9:.1f} GB)...")
+        start = time.time()
+
+        cache = []
+        last_read = -1
+        for scaled_f in range(n):
+            target_source = int(round(scaled_f / dt)) if dt != 1.0 else scaled_f
+            while last_read < target_source - 1:
+                self.__video.read()
+                last_read += 1
+            ret, frame = self.__video.read()
+            last_read += 1
+            if ret:
+                if dx != 1.0 and not self.__pre_scaled:
+                    frame = cv2.resize(frame, (self.__width, self.__height))
+                if fmt == "jpeg":
+                    ok, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    cache.append(encoded if ok else None)
+                else:
+                    cache.append(frame)
+            else:
+                cache.append(None)
+
+        self.__frame_cache = cache
+        self.__cache_format = fmt
+        self.__current_source_pos = last_read + 1
+        print(f"[preview] Cached {len(cache)} frames in {time.time() - start:.1f}s")
 
     def open(self) -> None:
         """Open the video file using OpenCV's VideoCapture.
@@ -419,6 +524,29 @@ class Video:
         """
         if frame_index < 0 or frame_index >= self.__frame_duration:
             raise ValueError(f"Frame index {frame_index} is out of bounds (0 to {self.__frame_duration - 1}).")
+
+        with _profile("video.get_frame"):
+            return self._get_frame_impl(frame_index, w, h)
+
+    def _get_frame_impl(self, frame_index, w, h):
+        # Fast path: in-memory cached frame.
+        if self.__frame_cache is not None:
+            cached = self.__frame_cache[frame_index]
+            if cached is None:
+                frame = rnp.zeros((self.__height, self.__width, 3), dtype=rnp.uint8)
+            elif self.__cache_format == "jpeg":
+                # imdecode returns a fresh array; no copy needed
+                frame = cv2.imdecode(cached, cv2.IMREAD_COLOR)
+            else:
+                # Raw cache holds shared arrays; copy to protect from in-place filter mutation
+                frame = cached.copy()
+            if gpu_enabled:
+                frame = np.asarray(frame)
+            if h is None and w != 1.0:
+                frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
+            elif h is not None:
+                frame = cv2.resize(frame, (w, h))
+            return Frame(frame)
 
         # Map scaled (preview) index to source index
         if dt != 1.0:
@@ -521,11 +649,12 @@ class Video:
         Returns:
             FrameAudio: The corresponding audio frame for the specified video frame.
         """
-        if dt != 1.0:
-            source_idx = min(self.__source_frame_count - 1, int(round(index / dt)))
-        else:
-            source_idx = index
-        return self.audio.frame_audio(source_idx)
+        with _profile("video.frame_audio"):
+            if dt != 1.0:
+                source_idx = min(self.__source_frame_count - 1, int(round(index / dt)))
+            else:
+                source_idx = index
+            return self.audio.frame_audio(source_idx)
 
 
 class Audio:
@@ -869,18 +998,20 @@ class NonlinearRenderer:
         Raises:
             ValueError: If the frame dimensions do not match the initialized resolution.
         """
-        if new_frame.get_pixels(True).shape != (self.__height, self.__width, 3):
+        # Compute the uint8 view once and reuse for both the shape check and the write.
+        write_pixels = new_frame.get_pixels(True)
+        if write_pixels.shape != (self.__height, self.__width, 3):
             raise ValueError(
                 f"Frame dimensions do not match the initialized video resolution. "
-                f"Frame dimensions are {new_frame.get_pixels().shape[1]}x{new_frame.get_pixels().shape[0]}, "
+                f"Frame dimensions are {write_pixels.shape[1]}x{write_pixels.shape[0]}, "
                 f"but renderer dimensions are {self.__width}x{self.__height}."
             )
 
         self.__frame_indices.append(frame_index)
-        write_pixels = new_frame.get_pixels(True)
         if gpu_enabled:
             write_pixels = np.asnumpy(write_pixels)
-        self.__unordered_writer.write(write_pixels)
+        with _profile("renderer.set_frame.write"):
+            self.__unordered_writer.write(write_pixels)
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
 
         # Track whether frames were appended sequentially (0, 1, 2, ...) with no gaps
@@ -1034,11 +1165,28 @@ class NonlinearRenderer:
             ordered_writer.release()
 
         if self.__audios:
-            self.__attach_audios("silent_render.mp4", self.__audios, "render.mp4")
+            with _profile("renderer.attach_audios"):
+                self.__attach_audios("silent_render.mp4", self.__audios, "render.mp4")
             print("Video compiled with audio as render.mp4")
         else:
             shutil.copy("silent_render.mp4", "render.mp4")
             print("Video compiled without audio as render.mp4")
+
+        _print_profile_summary()
+
+        # Reset state so subsequent renders (e.g., under the persistent worker)
+        # start from a clean slate.
+        self.__frame_indices = []
+        self.__max_frame_index = -1
+        self.__in_order = True
+        self.__expected_next = 0
+        self.__audios = []
+        self.__unordered_writer = cv2.VideoWriter(
+            "unordered_render.mp4",
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            self.__fps,
+            (self.__width, self.__height)
+        )
 
     def __attach_audios(self, rendered_video: str, audios: List[tuple['Audio', float]], output_video: str) -> None:
         """Attach multiple audio tracks to the final rendered video using ffmpeg.
@@ -1343,6 +1491,14 @@ if _paths:  # Ensure _paths is not empty
 
 if len(_paths) != 0:
     class Field:
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__(**kwargs)
+            original_init = cls.__init__
+            def profiled_init(self, *args, **kw):
+                with _profile(f"construct_field:{cls.__name__}"):
+                    original_init(self, *args, **kw)
+            cls.__init__ = profiled_init
+
         def __init__(self) -> None:
             """Initialize a Field object with a blank, zero-filled map.
 
@@ -1439,8 +1595,13 @@ if len(_paths) != 0:
             Returns:
                 Field: A new Field with the result.
             """
-            clone = copy.deepcopy(self)
-            return clone.add(other)
+            with _profile("field.__add__"):
+                # Fast clone — Field only carries _map and inverted.
+                # copy.deepcopy is ~5-10x slower because it recursively traverses everything.
+                clone = self.__class__.__new__(self.__class__)
+                clone._map = self._map.copy()
+                clone.inverted = self.inverted
+                return clone.add(other)
 
         def __sub__(self, other: 'Field' or float) -> 'Field':
             """Return a new Field representing this - other.
@@ -2022,6 +2183,14 @@ if len(_paths) != 0:
     class Filter:
         """A filter that aligns a Field object with the current renderer dimensions."""
 
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__(**kwargs)
+            original_init = cls.__init__
+            def profiled_init(self, *args, **kw):
+                with _profile(f"construct_filter:{cls.__name__}"):
+                    original_init(self, *args, **kw)
+            cls.__init__ = profiled_init
+
         def __init__(self, field: Optional[Field] = None) -> None:
             """Initialize a Filter instance.
 
@@ -2405,6 +2574,8 @@ class Color_Map(Filter):
 class Rainbow_Map(Filter):
     """A filter that maps grayscale pixel intensities to a rainbow gradient repeated multiple times."""
 
+    _cached_rainbow_map = None
+
     def __init__(self, repeat: int = 1, field: Optional[Field] = None) -> None:
         """Initialize the Rainbow_Map filter.
 
@@ -2417,6 +2588,37 @@ class Rainbow_Map(Filter):
         if repeat < 1:
             raise ValueError("Repeat count must be at least 1.")
         self.repeat = repeat
+
+    @classmethod
+    def _get_rainbow_map(cls):
+        if cls._cached_rainbow_map is not None:
+            return cls._cached_rainbow_map
+        color_stops = np.array([
+            [1.0, 0.0, 0.0],   # Red
+            [1.0, 0.5, 0.0],   # Orange
+            [1.0, 1.0, 0.0],   # Yellow
+            [0.0, 1.0, 0.0],   # Green
+            [0.0, 0.0, 1.0],   # Blue
+            [0.29, 0.0, 0.51], # Indigo (approx)
+            [0.58, 0.0, 0.83]  # Purple
+        ], dtype=np.float32)
+        num_bins = 256
+        rainbow_map = np.zeros((num_bins, 3), dtype=np.float32)
+        segments = len(color_stops) - 1
+        segment_length = num_bins // segments
+        for i in range(segments):
+            start_color = color_stops[i]
+            end_color = color_stops[i + 1]
+            for j in range(segment_length):
+                t = j / segment_length
+                color = (1 - t) * start_color + t * end_color
+                idx = i * segment_length + j
+                if idx < num_bins:
+                    rainbow_map[idx] = color
+        for idx in range(segments * segment_length, num_bins):
+            rainbow_map[idx] = color_stops[-1]
+        cls._cached_rainbow_map = rainbow_map
+        return rainbow_map
 
     def apply(self, pixels: np.ndarray) -> np.ndarray:
         """Apply the repeated rainbow mapping filter to the pixel data.
@@ -2432,35 +2634,8 @@ class Rainbow_Map(Filter):
         # Normalize grayscale to range [0, 1]
         norm_gray = gray / 255.0
 
-        # Create a rainbow colormap from red to purple
-        color_stops = np.array([
-            [1.0, 0.0, 0.0],   # Red
-            [1.0, 0.5, 0.0],   # Orange
-            [1.0, 1.0, 0.0],   # Yellow
-            [0.0, 1.0, 0.0],   # Green
-            [0.0, 0.0, 1.0],   # Blue
-            [0.29, 0.0, 0.51], # Indigo (approx)
-            [0.58, 0.0, 0.83]  # Purple
-        ], dtype=np.float32)
-
+        rainbow_map = self._get_rainbow_map()
         num_bins = 256
-        rainbow_map = np.zeros((num_bins, 3), dtype=np.float32)
-
-        segments = len(color_stops) - 1
-        segment_length = num_bins // segments
-
-        for i in range(segments):
-            start_color = color_stops[i]
-            end_color = color_stops[i + 1]
-            for j in range(segment_length):
-                t = j / segment_length
-                color = (1 - t) * start_color + t * end_color
-                idx = i * segment_length + j
-                if idx < num_bins:
-                    rainbow_map[idx] = color
-
-        for idx in range(segments * segment_length, num_bins):
-            rainbow_map[idx] = color_stops[-1]
 
         # Repeat the normalized grayscale value to range [0, 1]*repeat then mod 1 so it wraps around
         repeated_value = (norm_gray * self.repeat) % 1.0

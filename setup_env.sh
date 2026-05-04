@@ -8,7 +8,7 @@ echo "Creating virtual environment at: $VENV_DIR"
 
 echo "Installing dependencies..."
 "$VENV_DIR/bin/pip" install --upgrade pip
-"$VENV_DIR/bin/pip" install pillow opencv-python scipy librosa soundfile openai pyqt5 numpy
+"$VENV_DIR/bin/pip" install pillow opencv-python scipy librosa soundfile openai pyqt5 numpy psutil
 
 echo ""
 echo "Done. Neovere will automatically use this environment on next run."

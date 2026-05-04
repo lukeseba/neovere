@@ -1,6 +1,8 @@
 class Rainbow_Map(Filter):
     """A filter that maps grayscale pixel intensities to a rainbow gradient repeated multiple times."""
 
+    _cached_rainbow_map = None
+
     def __init__(self, repeat: int = 1, field: Optional[Field] = None) -> None:
         """Initialize the Rainbow_Map filter.
 
@@ -13,6 +15,37 @@ class Rainbow_Map(Filter):
         if repeat < 1:
             raise ValueError("Repeat count must be at least 1.")
         self.repeat = repeat
+
+    @classmethod
+    def _get_rainbow_map(cls):
+        if cls._cached_rainbow_map is not None:
+            return cls._cached_rainbow_map
+        color_stops = np.array([
+            [1.0, 0.0, 0.0],   # Red
+            [1.0, 0.5, 0.0],   # Orange
+            [1.0, 1.0, 0.0],   # Yellow
+            [0.0, 1.0, 0.0],   # Green
+            [0.0, 0.0, 1.0],   # Blue
+            [0.29, 0.0, 0.51], # Indigo (approx)
+            [0.58, 0.0, 0.83]  # Purple
+        ], dtype=np.float32)
+        num_bins = 256
+        rainbow_map = np.zeros((num_bins, 3), dtype=np.float32)
+        segments = len(color_stops) - 1
+        segment_length = num_bins // segments
+        for i in range(segments):
+            start_color = color_stops[i]
+            end_color = color_stops[i + 1]
+            for j in range(segment_length):
+                t = j / segment_length
+                color = (1 - t) * start_color + t * end_color
+                idx = i * segment_length + j
+                if idx < num_bins:
+                    rainbow_map[idx] = color
+        for idx in range(segments * segment_length, num_bins):
+            rainbow_map[idx] = color_stops[-1]
+        cls._cached_rainbow_map = rainbow_map
+        return rainbow_map
 
     def apply(self, pixels: np.ndarray) -> np.ndarray:
         """Apply the repeated rainbow mapping filter to the pixel data.
@@ -28,35 +61,8 @@ class Rainbow_Map(Filter):
         # Normalize grayscale to range [0, 1]
         norm_gray = gray / 255.0
 
-        # Create a rainbow colormap from red to purple
-        color_stops = np.array([
-            [1.0, 0.0, 0.0],   # Red
-            [1.0, 0.5, 0.0],   # Orange
-            [1.0, 1.0, 0.0],   # Yellow
-            [0.0, 1.0, 0.0],   # Green
-            [0.0, 0.0, 1.0],   # Blue
-            [0.29, 0.0, 0.51], # Indigo (approx)
-            [0.58, 0.0, 0.83]  # Purple
-        ], dtype=np.float32)
-
+        rainbow_map = self._get_rainbow_map()
         num_bins = 256
-        rainbow_map = np.zeros((num_bins, 3), dtype=np.float32)
-
-        segments = len(color_stops) - 1
-        segment_length = num_bins // segments
-
-        for i in range(segments):
-            start_color = color_stops[i]
-            end_color = color_stops[i + 1]
-            for j in range(segment_length):
-                t = j / segment_length
-                color = (1 - t) * start_color + t * end_color
-                idx = i * segment_length + j
-                if idx < num_bins:
-                    rainbow_map[idx] = color
-
-        for idx in range(segments * segment_length, num_bins):
-            rainbow_map[idx] = color_stops[-1]
 
         # Repeat the normalized grayscale value to range [0, 1]*repeat then mod 1 so it wraps around
         repeated_value = (norm_gray * self.repeat) % 1.0
