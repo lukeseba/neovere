@@ -2,8 +2,11 @@ cmake_minimum_required(VERSION 3.5)
 project(SimpleQtApp)
 
 set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_PREFIX_PATH "C:/Qt/6.8.0/mingw_64;C:/opencv/build/x64/vc16/lib")
-
+if(APPLE)
+    set(CMAKE_PREFIX_PATH "/opt/homebrew/opt/qt;/opt/homebrew/opt/opencv")
+elseif(WIN32)
+    set(CMAKE_PREFIX_PATH "C:/Qt/6.8.0/mingw_64;C:/opencv/build/x64/vc16/lib")
+endif()
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)

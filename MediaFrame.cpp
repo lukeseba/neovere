@@ -12,6 +12,7 @@
 #include <QMediaPlayer>
 #include <QMediaMetaData>
 #include <QDebug>
+#include <QFileInfo>
 
 MediaFrame::MediaFrame(QWidget *parent)
     : MaintainFrame(16, 9, parent),
@@ -45,7 +46,15 @@ videoWidget(new QVideoWidget(this)) {
             } else {
                 qDebug() << "Resolution is invalid";
             }
+        } else if (status == QMediaPlayer::InvalidMedia) {
+            qDebug() << "Invalid media:" << mediaPlayer.source() << "-" << mediaPlayer.errorString();
+        } else if (status == QMediaPlayer::NoMedia) {
+            qDebug() << "No media source set";
         }
+    });
+
+    QObject::connect(&mediaPlayer, &QMediaPlayer::errorOccurred, [&](QMediaPlayer::Error error, const QString &errorString) {
+        qDebug() << "Media player error" << error << ":" << errorString << "| source:" << mediaPlayer.source();
     });
 
     // ensure video stays isPaused if unisPaused by anything else
@@ -79,7 +88,7 @@ void MediaFrame::setVideo(const QString &filePath) {
     if (filePath.isEmpty()) {
         mediaPlayer.setSource(QUrl());
     } else {
-        mediaPlayer.setSource(QUrl::fromLocalFile(filePath));
+        mediaPlayer.setSource(QUrl::fromLocalFile(QFileInfo(filePath).absoluteFilePath()));
         mediaPlayer.setPosition(0);
         pauseVideo();
     }

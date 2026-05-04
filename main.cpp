@@ -282,6 +282,8 @@ void remakeNeoverePy(QStringList &mediaPath) {
 
     if (settings.length() > 0) {
         openaiKey = settings.at(0);
+    }
+    if (settings.length() > 1) {
         gpuEnabled = settings.at(1) == "1" ? "True" : "False";
     }
         fileString.replace("%$#path#$%", allPaths);
@@ -315,7 +317,16 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
     // Set up environment
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     process->setProcessEnvironment(env);
-    QString pythonExecutable = "python3"; // Adjust for Windows if needed
+    QString pythonExecutable = "python3";
+    QStringList settings = readFromFile("settings.txt").split("\n");
+    if (settings.length() > 2 && !settings.at(2).trimmed().isEmpty()) {
+        pythonExecutable = settings.at(2).trimmed();
+    } else {
+        QString autoVenv = QDir::homePath() + "/neovere_venv/bin/python3";
+        if (QFile::exists(autoVenv)) {
+            pythonExecutable = autoVenv;
+        }
+    }
 
     // Connect process output signals
     QObject::connect(process, &QProcess::readyReadStandardOutput, [outputDisplay]() {
@@ -781,6 +792,14 @@ int main(int argc, char *argv[]) {
     QString currentVideo = "";
     QString currentFile = "";
     QString openaiKey;
+    if (!QFile::exists("settings.txt")) {
+        QFile defaultSettings("settings.txt");
+        if (defaultSettings.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&defaultSettings);
+            out << "\n0\n";
+            defaultSettings.close();
+        }
+    }
     QStringList settings = readFromFile("settings.txt").split("\n");
     if (settings.length() > 0) {
         openaiKey = settings.at(0);
@@ -791,6 +810,14 @@ int main(int argc, char *argv[]) {
     // Main window widget
     QWidget window;
     window.setWindowTitle("NEOVERE");
+
+    auto updateTitle = [&window, &currentFile]() {
+        if (currentFile.isEmpty()) {
+            window.setWindowTitle("NEOVERE");
+        } else {
+            window.setWindowTitle("NEOVERE - " + QFileInfo(currentFile).baseName());
+        }
+    };
     window.resize(1200, 560);
 
     // Color Palette
@@ -1092,7 +1119,7 @@ int main(int argc, char *argv[]) {
     // --------------- CONNECTIONS ---------------------
 
     // map save shortcut
-    QObject::connect(saveShortcut, &QShortcut::activated, [codePanel, outputDisplay, &mediaPath, &currentFile]() {
+    QObject::connect(saveShortcut, &QShortcut::activated, [codePanel, outputDisplay, &mediaPath, &currentFile, &updateTitle]() {
         QString programs[] = {codePanel->toPlainText()};
 
         if (!currentFile.isEmpty()) {
@@ -1101,6 +1128,7 @@ int main(int argc, char *argv[]) {
         } else {
             // Otherwise prompt for new file name
             currentFile = saveProjectToFile(programs, mediaPath, outputDisplay);
+            updateTitle();
         }
     });
 
@@ -1119,7 +1147,7 @@ int main(int argc, char *argv[]) {
     });
 
     // Make the open button open a nv file
-    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath, mediaHeader, &currentFile]() {
+    QObject::connect(openButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath, mediaHeader, &currentFile, &updateTitle]() {
         QStringList programs;
         QStringList videos;
 
@@ -1133,6 +1161,7 @@ int main(int argc, char *argv[]) {
                 importMedia(video, mediaPath, outputDisplay, mediaHeader);
             }
         }
+        updateTitle();
     });
 
 
@@ -1150,7 +1179,7 @@ int main(int argc, char *argv[]) {
 
 
     // make the new button open a new default file
-    QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay, mediaHeader, &currentFile]() {
+    QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay, mediaHeader, &currentFile, &updateTitle]() {
         QMessageBox confirmationDialog;
         confirmationDialog.setWindowTitle("Confirm New Program");
         confirmationDialog.setText("Are you sure you want to create a new program? Unsaved changes will be lost.");
@@ -1160,26 +1189,72 @@ int main(int argc, char *argv[]) {
         if (confirmationDialog.exec() == QMessageBox::Yes) {
             createNewFile(codePanel, outputDisplay, mediaHeader);
             currentFile = "";
+            updateTitle();
         }
     });
 
 
     // Make save button download file
-    QObject::connect(saveButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath, &currentFile]() {
+    QObject::connect(saveButton, &QPushButton::clicked, [codePanel, outputDisplay, &mediaPath, &currentFile, &updateTitle]() {
         QString programs[] = {codePanel->toPlainText()};
 
         currentFile = saveProjectToFile(programs, mediaPath, outputDisplay);
+        updateTitle();
+    });
+
+    QObject::connect(exportButton, &QPushButton::clicked, [&window, codePanel, outputDisplay, mediaHeader, mediaPanel]() {
+        QString destPath = QFileDialog::getSaveFileName(&window, "Export Render", "render.mp4", "MP4 Video (*.mp4)");
+        if (destPath.isEmpty()) return;
+
+        if (!QFile::exists("render.mp4")) {
+            QMessageBox::warning(&window, "Export", "No render.mp4 found yet. Run a render first.");
+            return;
+        }
+
+        QMessageBox choice(&window);
+        choice.setWindowTitle("Export");
+        choice.setText("Export the last render, or re-render first?");
+        QPushButton* useLastBtn = choice.addButton("Use Last Render", QMessageBox::AcceptRole);
+        QPushButton* rerenderBtn = choice.addButton("Re-render", QMessageBox::ActionRole);
+        choice.addButton(QMessageBox::Cancel);
+        choice.exec();
+
+        auto copyOver = [destPath, outputDisplay, &window]() {
+            if (QFile::exists(destPath)) QFile::remove(destPath);
+            if (QFile::copy("render.mp4", destPath)) {
+                outputDisplay->appendPlainText("Exported to: " + destPath);
+            } else {
+                QMessageBox::critical(&window, "Export", "Failed to copy render.mp4 to " + destPath);
+            }
+        };
+
+        if (choice.clickedButton() == useLastBtn) {
+            copyOver();
+        } else if (choice.clickedButton() == rerenderBtn) {
+            QString code = codePanel->toPlainText();
+            compileCode(code, outputDisplay, mediaHeader, mediaPanel);
+            QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                &window, [copyOver, outputDisplay](int exitCode, QProcess::ExitStatus) {
+                    if (exitCode == 0) {
+                        copyOver();
+                    } else {
+                        outputDisplay->appendPlainText("Re-render failed; export aborted.");
+                    }
+                }, Qt::SingleShotConnection);
+        }
     });
 
     QObject::connect(settingsButton, &QPushButton::clicked, [&openaiKey, &mediaPath]() {
         // Load current key from file if it exists
         QString currentKey;
         bool currentGpuEnabled = false;
+        QString currentPythonPath;
         QFile settingsFile("settings.txt");
         if (settingsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
             QTextStream in(&settingsFile);
             currentKey = in.readLine().trimmed();
             currentGpuEnabled = in.readLine().trimmed().toInt();
+            currentPythonPath = in.readLine().trimmed();
             settingsFile.close();
         }
 
@@ -1198,6 +1273,11 @@ int main(int argc, char *argv[]) {
         layout->addWidget(gpuCheckbox);
         gpuCheckbox->setChecked(currentGpuEnabled);
 
+        QLineEdit* pythonPathInput = new QLineEdit(currentPythonPath);
+        pythonPathInput->setPlaceholderText("python3");
+        layout->addWidget(new QLabel("Python interpreter path (leave blank for auto-detect):"));
+        layout->addWidget(pythonPathInput);
+
         QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
         layout->addWidget(buttonBox);
 
@@ -1207,6 +1287,7 @@ int main(int argc, char *argv[]) {
         if (dialog.exec() == QDialog::Accepted) {
             QString key = keyInput->text().trimmed();
             bool gpuEnabled = gpuCheckbox->isChecked();
+            QString pythonPath = pythonPathInput->text().trimmed();
 
             openaiKey = key;
 
@@ -1216,6 +1297,8 @@ int main(int argc, char *argv[]) {
                 out << openaiKey;
                 out << "\n";
                 out << gpuEnabled;
+                out << "\n";
+                out << pythonPath;
                 outFile.close();
             } else {
                 QMessageBox::critical(nullptr, "Error", "Failed to save settings.");
@@ -1271,6 +1354,142 @@ int main(int argc, char *argv[]) {
 
     // Set the layout for the window
     window.setLayout(mainLayout);
+
+    // Auto-create venv on first run if it doesn't exist
+    QString venvPython = QDir::homePath() + "/neovere_venv/bin/python3";
+    if (!QFile::exists(venvPython)) {
+        outputDisplay->appendPlainText("Setting up Python environment for the first time, please wait...");
+
+        QProcess* setupProcess = new QProcess();
+        QString setupScript =
+            "/usr/bin/python3 -m venv ~/neovere_venv && "
+            "~/neovere_venv/bin/pip install --upgrade pip && "
+            "~/neovere_venv/bin/pip install pillow opencv-python scipy librosa soundfile openai pyqt5 numpy";
+
+        QObject::connect(setupProcess, &QProcess::readyReadStandardOutput, [setupProcess, outputDisplay]() {
+            outputDisplay->appendPlainText(setupProcess->readAllStandardOutput().trimmed());
+        });
+        QObject::connect(setupProcess, &QProcess::readyReadStandardError, [setupProcess, outputDisplay]() {
+            outputDisplay->appendPlainText(setupProcess->readAllStandardError().trimmed());
+        });
+        QObject::connect(setupProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            [outputDisplay](int exitCode, QProcess::ExitStatus) {
+                if (exitCode == 0) {
+                    outputDisplay->appendPlainText("Python environment ready.");
+                } else {
+                    outputDisplay->appendPlainText("Environment setup failed. You can set a Python interpreter manually in Settings.");
+                }
+            });
+
+        setupProcess->start("/bin/bash", QStringList() << "-lc" << setupScript);
+    }
+
+    // Generate placeholder render.mp4 if it doesn't exist
+    if (!QFile::exists("render.mp4")) {
+        QString pythonExecutable = "python3";
+        QStringList startupSettings = readFromFile("settings.txt").split("\n");
+        if (startupSettings.length() > 2 && !startupSettings.at(2).trimmed().isEmpty()) {
+            pythonExecutable = startupSettings.at(2).trimmed();
+        } else if (QFile::exists(venvPython)) {
+            pythonExecutable = venvPython;
+        }
+
+        QString arialPath = exportFontResourceToFile(":/resources/fonts/arial-bold.ttf");
+
+        QString placeholderScript = QString(R"SCRIPT(import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+FONT_PATHS = ["%1"]
+
+W, H = 1920, 1080
+img = np.zeros((H, W, 3), dtype=np.uint8)
+
+row1 = [(192,192,192),(192,192,0),(0,192,192),(0,192,0),(192,0,192),(192,0,0),(0,0,192)]
+row2 = [(0,0,192),(19,19,19),(192,0,192),(19,19,19),(0,192,192),(19,19,19),(192,192,192)]
+row3 = [(0,33,76),(255,255,255),(50,0,106),(19,19,19),(0,0,0),(19,19,19),(38,38,38)]
+
+num_cols = 7
+col_w = W // num_cols
+row1_h = int(H * 0.67)
+row2_h = int(H * 0.08)
+rows = [(0, row1_h, row1), (row1_h, row1_h + row2_h, row2), (row1_h + row2_h, H, row3)]
+
+for y1, y2, colors in rows:
+    for c in range(num_cols):
+        x1 = c * col_w
+        x2 = x1 + col_w if c < num_cols - 1 else W
+        r, g, b = colors[c]
+        img[y1:y2, x1:x2] = (b, g, r)
+
+# Draw text with Arial via PIL
+pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+draw = ImageDraw.Draw(pil_img)
+font = None
+for p in FONT_PATHS:
+    try:
+        font = ImageFont.truetype(p, 110)
+        break
+    except Exception:
+        continue
+if font is None:
+    font = ImageFont.load_default()
+
+draw.text((20, H // 2 - 120), "your next render will", fill=(255,255,255), font=font)
+draw.text((20, H // 2),       "be displayed here",     fill=(255,255,255), font=font)
+
+img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+import os, subprocess
+
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+silent_path = "render_silent.mp4"
+writer = cv2.VideoWriter(silent_path, fourcc, 24.0, (W, H))
+for _ in range(24 * 5):
+    writer.write(img)
+writer.release()
+
+# Mux a silent stereo audio track using ffmpeg's lavfi anullsrc
+result = subprocess.run([
+    "ffmpeg", "-y",
+    "-i", silent_path,
+    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+    "-shortest",
+    "-c:v", "copy",
+    "-c:a", "aac",
+    "render.mp4"
+], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+if result.returncode != 0:
+    # fall back to no-audio render if ffmpeg unavailable
+    os.replace(silent_path, "render.mp4")
+    print("ffmpeg unavailable; placeholder has no audio track")
+else:
+    if os.path.exists(silent_path):
+        os.remove(silent_path)
+    print("placeholder render.mp4 written with silent audio track")
+)SCRIPT").arg(arialPath);
+
+        outputDisplay->appendPlainText("Generating placeholder render.mp4 with: " + pythonExecutable);
+        QProcess* placeholderProcess = new QProcess();
+        QObject::connect(placeholderProcess, &QProcess::readyReadStandardOutput, [placeholderProcess, outputDisplay]() {
+            outputDisplay->appendPlainText("[placeholder] " + QString::fromUtf8(placeholderProcess->readAllStandardOutput()).trimmed());
+        });
+        QObject::connect(placeholderProcess, &QProcess::readyReadStandardError, [placeholderProcess, outputDisplay]() {
+            outputDisplay->appendPlainText("[placeholder err] " + QString::fromUtf8(placeholderProcess->readAllStandardError()).trimmed());
+        });
+        QObject::connect(placeholderProcess, &QProcess::errorOccurred, [outputDisplay](QProcess::ProcessError e) {
+            outputDisplay->appendPlainText(QString("[placeholder] process error: %1").arg(e));
+        });
+        QObject::connect(placeholderProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            [mediaPanel, outputDisplay](int exitCode, QProcess::ExitStatus) {
+                outputDisplay->appendPlainText(QString("[placeholder] finished exit=%1").arg(exitCode));
+                if (exitCode == 0) {
+                    mediaPanel->reloadVideo();
+                }
+            });
+        placeholderProcess->start(pythonExecutable, QStringList() << "-c" << placeholderScript);
+    }
 
     // Show the window
     window.show();
