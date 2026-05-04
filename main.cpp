@@ -1225,9 +1225,10 @@ int main(int argc, char *argv[]) {
         QMessageBox choice(&window);
         choice.setWindowTitle("Export");
         choice.setText("Export the last render, or re-render first?");
-        QPushButton* useLastBtn = choice.addButton("Use Last Render", QMessageBox::AcceptRole);
-        QPushButton* rerenderBtn = choice.addButton("Re-render", QMessageBox::ActionRole);
+        QPushButton* rerenderBtn = choice.addButton("Re-render", QMessageBox::AcceptRole);
+        QPushButton* useLastBtn = choice.addButton("Use Last Render", QMessageBox::ActionRole);
         choice.addButton(QMessageBox::Cancel);
+        choice.setDefaultButton(rerenderBtn);
         choice.exec();
 
         auto copyOver = [destPath, outputDisplay, &window]() {
