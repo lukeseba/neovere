@@ -909,6 +909,20 @@ class NonlinearRenderer:
         self.__expected_next = 0
         self.__preview_mode = False
         self.__show_previews = False
+        # Shared-memory frame buffer state — only used when the wrapper enables it.
+        self.__use_frame_buffer = False
+        self.__fb_path = "/tmp/neovere_frames.bin"
+        self.__fb_mm = None              # numpy memmap of frame data (post-header)
+        self.__fb_max_frames = 0         # capacity of allocated buffer
+        self.__fb_generation = 0
+        self.__fb_failed = False         # if buffer alloc failed, fall back to video file
+        self.__fb_actual_frames = 0      # number of frames the user actually wrote
+
+    def set_use_frame_buffer(self, enabled: bool) -> None:
+        """When enabled, set_frame() also writes frames to a shared-memory buffer
+        for the C++ side to display directly (skipping the video file decode path).
+        Falls back to disk-only rendering if the buffer can't be allocated."""
+        self.__use_frame_buffer = enabled
 
     def set_preview_mode(self, enabled: bool) -> None:
         """Enable preview mode: skip audio mux, output to preview.mp4 instead of render.mp4."""
@@ -920,11 +934,7 @@ class NonlinearRenderer:
         self.__show_previews = enabled
 
     def reset(self) -> None:
-        """Clear all accumulated frame state and start fresh.
-
-        Called at the start of each render cycle so prior runs that errored before
-        reaching render() don't leave dirty state behind that corrupts the next run.
-        """
+        """Clear all accumulated frame state and start fresh."""
         self.__frame_indices = []
         self.__max_frame_index = -1
         self.__in_order = True
@@ -936,6 +946,91 @@ class NonlinearRenderer:
             self.__fps,
             (self.__width, self.__height)
         )
+        # Reset frame buffer state too so each render starts with a fresh allocation.
+        self.__fb_mm = None
+        self.__fb_max_frames = 0
+        self.__fb_failed = False
+        self.__fb_actual_frames = 0
+
+    # -- shared-memory frame buffer helpers --
+
+    def _fb_header_size(self) -> int:
+        return 64
+
+    def _fb_allocate(self) -> bool:
+        """Allocate the shared-memory frame buffer based on available RAM.
+        Returns True on success, False if we should fall back to video-file mode.
+
+        IMPORTANT: this NEVER shrinks the file. Shrinking would invalidate the
+        C++ side's mmap and crash with SIGBUS when it reads an unmapped page.
+        """
+        try:
+            try:
+                import psutil
+                free_ram = psutil.virtual_memory().available
+            except Exception:
+                free_ram = 4 * 1024 ** 3
+
+            # Use up to 30% of free RAM for the preview frame buffer.
+            budget = int(free_ram * 0.3)
+            bytes_per_frame = self.__width * self.__height * 3
+            if bytes_per_frame <= 0:
+                return False
+
+            max_frames = max(1, budget // bytes_per_frame)
+            max_frames = min(max_frames, 20000)
+            needed_size = self._fb_header_size() + max_frames * bytes_per_frame
+
+            # Grow-only: only call truncate if the file is missing or smaller than needed.
+            if not os.path.exists(self.__fb_path):
+                with open(self.__fb_path, "wb") as f:
+                    f.truncate(needed_size)
+            else:
+                current_size = os.path.getsize(self.__fb_path)
+                if current_size < needed_size:
+                    # Open in append-binary which does NOT truncate to 0 first.
+                    with open(self.__fb_path, "ab") as f:
+                        f.truncate(needed_size)
+                # If the file is already big enough we leave it alone — C++ mmap is
+                # still valid, and the unused tail bytes are harmless.
+
+            self.__fb_mm = rnp.memmap(
+                self.__fb_path,
+                dtype=rnp.uint8,
+                mode="r+",
+                offset=self._fb_header_size(),
+                shape=(max_frames, self.__height, self.__width, 3),
+            )
+            self.__fb_max_frames = max_frames
+            self.__fb_actual_frames = 0
+            self.__fb_generation += 1
+            self._fb_write_header(0)
+            return True
+        except Exception as e:
+            print(f"[fb] allocation failed: {e}")
+            return False
+
+    def _fb_write_header(self, frame_count: int) -> None:
+        """Write the 64-byte header. Layout matches FrameBufferReader::Header in C++."""
+        import struct
+        try:
+            with open(self.__fb_path, "r+b") as f:
+                f.seek(0)
+                f.write(struct.pack(
+                    "<IIIIIfII",
+                    0x4E454F56,             # magic 'NEOV'
+                    self.__fb_generation,
+                    frame_count,
+                    self.__width,
+                    self.__height,
+                    float(self.__fps),
+                    3,                      # channels (RGB)
+                    0,                      # dtype (uint8)
+                ))
+                f.write(b"\x00" * (self._fb_header_size() - 32))
+                f.flush()
+        except Exception as e:
+            print(f"[fb] header write failed: {e}")
 
     def set_frame(self, frame_index: int, new_frame: 'Frame') -> None:
         """Set a frame at a specific index for the output video.
@@ -961,6 +1056,22 @@ class NonlinearRenderer:
             write_pixels = np.asnumpy(write_pixels)
         with _profile("renderer.set_frame.write"):
             self.__unordered_writer.write(write_pixels)
+
+        # Mirror the frame into the shared-memory buffer if enabled.
+        if self.__use_frame_buffer and not self.__fb_failed:
+            if self.__fb_mm is None:
+                if not self._fb_allocate():
+                    self.__fb_failed = True
+            if self.__fb_mm is not None and frame_index < self.__fb_max_frames:
+                # cv2 gives BGR, the buffer holds RGB. Convert with a fast slice swap.
+                self.__fb_mm[frame_index] = write_pixels[:, :, ::-1]
+                if frame_index + 1 > self.__fb_actual_frames:
+                    self.__fb_actual_frames = frame_index + 1
+            elif self.__fb_mm is not None:
+                # Out of capacity — disable buffer for the rest of this render
+                self.__fb_failed = True
+                print(f"[fb] frame {frame_index} exceeds buffer capacity {self.__fb_max_frames}; falling back to video file")
+
         if self.__show_previews:
             new_frame.preview()
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
@@ -1115,6 +1226,17 @@ class NonlinearRenderer:
             unordered_render.release()
             ordered_writer.release()
 
+        # If frame-buffer mode succeeded, finalize the header with the actual frame count
+        # and emit a marker so the C++ side can switch the preview tab to FrameBuffer mode
+        # right away — even before the audio mux below finishes.
+        if self.__use_frame_buffer and not self.__fb_failed and self.__fb_mm is not None:
+            try:
+                self.__fb_mm.flush()
+            except Exception:
+                pass
+            self._fb_write_header(self.__fb_actual_frames)
+            print("<<<NEO_FRAMES_READY>>>", flush=True)
+
         if self.__preview_mode:
             # Phase 1: produce a Qt-loadable preview.mp4 fast by muxing in cached audio
             # from the previous render if available, otherwise the silent placeholder.
@@ -1151,6 +1273,9 @@ class NonlinearRenderer:
                     "-vn", "-c:a", "copy",
                     "cached_preview_audio.aac"
                 ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                # Tell C++ to reload the audio so frame-buffer playback uses THIS render's
+                # audio (otherwise Qt's player keeps the previously-loaded version).
+                print("<<<NEO_AUDIO_READY>>>", flush=True)
                 print("Preview compiled as preview.mp4 (with audio)")
             else:
                 # No audio attached this render — invalidate the cache so phase 1 falls

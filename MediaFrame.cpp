@@ -23,9 +23,44 @@ videoWidget(new QVideoWidget(this)) {
 
     this->isPaused = false;
 
-    // set up layout to hold video widget
+    // Stack lets us flip between the existing video-file path (QVideoWidget)
+    // and the new frame-buffer path (PreviewWidget) without changing layouts.
     layout = new QVBoxLayout(this);
-    layout->addWidget(&videoWidget);
+    stack = new QStackedWidget(this);
+    stack->addWidget(&videoWidget);          // index 0: VideoFile mode
+    fbWidget = new PreviewWidget(this);
+    stack->addWidget(fbWidget);              // index 1: FrameBuffer mode
+    stack->setCurrentIndex(0);
+    layout->addWidget(stack);
+
+    controller = new PlaybackController(this);
+    controller->setPreviewWidget(fbWidget);
+
+    // While in FrameBuffer mode, mirror the controller's position into the (paused)
+    // QMediaPlayer so the existing VideoSlider — which is wired to mediaPlayer — keeps
+    // showing the right timeline position. fbMirroring guards against the reverse
+    // direction triggering a feedback loop.
+    QObject::connect(controller, &PlaybackController::positionChanged, this, [this](qint64 ms) {
+        if (mode != Mode::FrameBuffer) return;
+        if (fbMirroring) return;
+        if (mediaPlayer.position() == ms) return;
+        fbMirroring = true;
+        mediaPlayer.setPosition(ms);
+        fbMirroring = false;
+    });
+
+    // When the user scrubs the slider, it calls mediaPlayer.setPosition() which fires
+    // positionChanged on the player. In FrameBuffer mode, route that back into the
+    // controller so the displayed frame seeks too.
+    QObject::connect(&mediaPlayer, &QMediaPlayer::positionChanged, this, [this](qint64 ms) {
+        if (mode != Mode::FrameBuffer) return;
+        if (fbMirroring) return;
+        if (controller && controller->positionMs() != ms) {
+            fbMirroring = true;
+            controller->setPositionMs(ms);
+            fbMirroring = false;
+        }
+    });
 
     // configure media player to the video widget
     QAudioOutput *audioOut = new QAudioOutput();
@@ -105,13 +140,53 @@ void MediaFrame::setVideo(const QString &filePath) {
     }
 }
 void MediaFrame::playVideo() {
+    if (mode == Mode::FrameBuffer && controller) {
+        controller->play();
+        emit pauseStateChanged(false);
+        return;
+    }
     isPaused = false;
     mediaPlayer.play();
     emit pauseStateChanged(false);
 }
 
 void MediaFrame::pauseVideo() {
+    if (mode == Mode::FrameBuffer && controller) {
+        controller->pause();
+        emit pauseStateChanged(true);
+        return;
+    }
     isPaused = true;
     mediaPlayer.pause();
     emit pauseStateChanged(true);
+}
+
+// === Frame-buffer mode ===
+
+void MediaFrame::setFrameBuffer(FrameBufferReader* reader) {
+    if (controller) controller->setFrameBuffer(reader);
+}
+
+void MediaFrame::setFrameBufferAudio(const QString& path) {
+    if (controller) controller->setAudioFile(path);
+}
+
+void MediaFrame::reloadFrameBufferAudio() {
+    if (controller) controller->reloadAudioFile();
+}
+
+void MediaFrame::switchToVideoFile() {
+    if (mode == Mode::VideoFile) return;
+    mode = Mode::VideoFile;
+    if (controller) controller->pause();
+    stack->setCurrentIndex(0);
+}
+
+void MediaFrame::switchToFrameBuffer() {
+    if (mode == Mode::FrameBuffer) return;
+    mode = Mode::FrameBuffer;
+    // Pause the existing QMediaPlayer so its audio doesn't keep playing under us
+    isPaused = true;
+    mediaPlayer.pause();
+    stack->setCurrentIndex(1);
 }

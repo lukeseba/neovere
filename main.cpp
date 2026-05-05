@@ -27,6 +27,7 @@
 #include <QMediaPlayer>
 #include <QVideoWidget>
 #include <QSlider>
+#include <QLabel>
 #include <QTimer>
 #include <QMessageBox>
 #include <QInputDialog>
@@ -49,11 +50,32 @@
 #include "AiTextBoxWrapper.h"
 
 #include "TabsWidget.h"
+#include "FrameBufferReader.h"
+#include "PreviewWidget.h"
+#include "PlaybackController.h"
 
 QProcess* process = nullptr;
 QProcess* pythonWorker = nullptr;
 QByteArray workerOutBuffer;
 std::function<void(bool)> workerOnFinished;
+FrameBufferReader* g_frameBuffer = nullptr;       // shared-memory frame buffer reader (frame-buffer mode)
+TabsWidget* g_mediaHeader = nullptr;              // for updating the preview tab's "[updating]" indicator
+
+// Updates the title label below the media tabs to show "[updating]" while a preview
+// render is in flight, but only when the user is actually viewing the preview tab.
+static void updatePreviewTabLabel(bool updating) {
+    if (!g_mediaHeader) return;
+    TabButton* sel = g_mediaHeader->selectedTab();
+    if (!sel) return;
+    QString base = sel->text();
+    // Strip any trailing " [updating]" so we don't accumulate.
+    if (base.endsWith(" [updating]")) base.chop(QString(" [updating]").size());
+    if (updating && sel->getData() == "preview.mp4") {
+        g_mediaHeader->setLabelText(base + " [updating]");
+    } else {
+        g_mediaHeader->setLabelText(base);
+    }
+}
 bool isPreviewRender = false;            // current render is an auto-preview (suppress output, write preview.mp4)
 bool previewInFlight = false;            // an auto-preview is currently being rendered by the worker
 bool previewPending = false;             // user typed during a preview render → re-render after current finishes
@@ -413,10 +435,35 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                 isPreviewRender = true;
             } else if (line == "<<<NEO_BEGIN_RUN>>>") {
                 isPreviewRender = false;
+            } else if (line == "<<<NEO_FRAMES_READY>>>") {
+                // Auto-preview wrote frames into shared memory. Switch the preview tab
+                // to FrameBuffer mode and refresh.
+                if (!g_frameBuffer) {
+                    g_frameBuffer = new FrameBufferReader("/tmp/neovere_frames.bin");
+                }
+                if (!g_frameBuffer->isOpen()) {
+                    g_frameBuffer->open();
+                }
+                if (g_frameBuffer->isOpen()) {
+                    g_frameBuffer->refreshHeader();
+                    mediaPanel->setFrameBuffer(g_frameBuffer);
+                    if (QFile::exists("cached_preview_audio.aac")) {
+                        mediaPanel->setFrameBufferAudio(QFileInfo("cached_preview_audio.aac").absoluteFilePath());
+                    }
+                    if (mediaPanel->fbController()) mediaPanel->fbController()->refresh();
+                    mediaPanel->switchToFrameBuffer();
+                }
+            } else if (line == "<<<NEO_AUDIO_READY>>>") {
+                // Phase 2 just rewrote cached_preview_audio.aac. Force-reload it so the
+                // user hears THIS render's audio, not the previous one Qt has cached.
+                if (mediaPanel->currentMode() == MediaFrame::Mode::FrameBuffer) {
+                    mediaPanel->reloadFrameBufferAudio();
+                }
             } else if (line == "<<<NEO_VIDEO_READY>>>") {
-                // First-pass reload: video is ready (audio still being muxed).
-                // Only applies to preview renders right now.
-                if (previewInFlight) {
+                // First-pass preview.mp4 reload (legacy path). Skip when the panel is
+                // already in FrameBuffer mode — the buffer is the live source there and
+                // reloading the video file would steal control + pause the controller.
+                if (previewInFlight && mediaPanel->currentMode() != MediaFrame::Mode::FrameBuffer) {
                     TabButton* sel = mediaHeader->selectedTab();
                     if (sel && sel->getData() == "preview.mp4") {
                         qint64 savedPos = mediaPanel->getPlayer()->position();
@@ -436,21 +483,29 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                 // user's script fails with a SyntaxError (compile-time error).
                 bool wasPreview = previewInFlight;
                 if (wasPreview) {
-                    TabButton* sel = mediaHeader->selectedTab();
-                    if (sel && sel->getData() == "preview.mp4") {
-                        // Capture position AND playback state BEFORE the selectTab below
-                        // (which fires tabSelected → setVideo and resets both).
-                        qint64 savedPos = mediaPanel->getPlayer()->position();
-                        bool wasPlaying = mediaPanel->getPlayer()->playbackState() == QMediaPlayer::PlayingState;
-                        for (int i = 0; i < mediaHeader->tabCount(); ++i) {
-                            if (mediaHeader->getTab(i)->getData() == "preview.mp4") {
-                                mediaHeader->selectTab(i);
-                                break;
+                    // Run renders write preview.mp4 and need the video-file player to display it.
+                    // Auto-previews wrote into the shared frame buffer (FRAMES_READY already
+                    // switched the panel to FrameBuffer mode) so we leave the panel alone.
+                    if (runInFlight) {
+                        mediaPanel->switchToVideoFile();
+                        TabButton* sel = mediaHeader->selectedTab();
+                        if (sel && sel->getData() == "preview.mp4") {
+                            qint64 savedPos = mediaPanel->getPlayer()->position();
+                            bool wasPlaying = mediaPanel->getPlayer()->playbackState() == QMediaPlayer::PlayingState;
+                            for (int i = 0; i < mediaHeader->tabCount(); ++i) {
+                                if (mediaHeader->getTab(i)->getData() == "preview.mp4") {
+                                    mediaHeader->selectTab(i);
+                                    break;
+                                }
                             }
+                            mediaPanel->reloadVideo(savedPos, wasPlaying);
                         }
-                        mediaPanel->reloadVideo(savedPos, wasPlaying);
                     }
                     previewInFlight = false;
+                    // Only clear the [updating] label if there's no follow-up queued.
+                    if (!previewPending) {
+                        updatePreviewTabLabel(false);
+                    }
                     if (previewPending) {
                         previewPending = false;
                         if (previewDebounceTimer) previewDebounceTimer->start(0);
@@ -487,6 +542,7 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
             // If a preview was in flight when the worker died, unstick the pipeline so future previews dispatch.
             previewInFlight = false;
             isPreviewRender = false;
+            updatePreviewTabLabel(false);
             if (workerOnFinished) {
                 auto cb = workerOnFinished;
                 workerOnFinished = nullptr;
@@ -548,12 +604,17 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
         return;
     }
     previewInFlight = true;
+    updatePreviewTabLabel(true);
 
+    // Frame-buffer mode is enabled for auto-preview only (not Run renders, which need to
+    // produce render.mp4 for export and don't gain anything from the buffer).
+    QString useFrameBuffer = runInFlight ? "False" : "True";
     QString wrapped =
         "print('<<<NEO_BEGIN_PREVIEW>>>', flush=True)\n"
         "import neovere as _neovere_mod\n"
         "_neovere_mod.renderer.set_preview_mode(True)\n"
         "_neovere_mod.renderer.set_show_previews(" + QString(runInFlight ? "True" : "False") + ")\n"
+        "_neovere_mod.renderer.set_use_frame_buffer(" + useFrameBuffer + ")\n"
         + code;
     QByteArray scriptBytes = wrapped.toUtf8();
     QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
@@ -1087,6 +1148,7 @@ int main(int argc, char *argv[]) {
 
     // create video headers
     TabsWidget *mediaHeader = new TabsWidget();
+    g_mediaHeader = mediaHeader;
     mediaHeader->setColor(nvMid);
     mediaHeader->setTabsFont(dotim5);
     mediaHeader->setLabelFont(dotim7);
@@ -1426,8 +1488,14 @@ int main(int argc, char *argv[]) {
 
     QObject::connect(mediaHeader, &TabsWidget::tabSelected, [mediaHeader, &currentVideo, mediaPanel, videoSlider, pauseButton](int index) {
         currentVideo = mediaHeader->getTab(index)->getData();
+        // Selecting any tab forces video-file mode so the user actually sees the chosen
+        // video. The preview tab will switch back to FrameBuffer mode automatically when
+        // the next auto-preview completes (FRAMES_READY marker).
+        mediaPanel->switchToVideoFile();
         mediaPanel->setVideo(currentVideo);
         pauseButton->setState(true);
+        // Re-apply the [updating] suffix if a preview is currently rendering.
+        updatePreviewTabLabel(previewInFlight);
     });
 
 

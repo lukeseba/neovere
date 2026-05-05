@@ -24,6 +24,7 @@ public:
     TabButton * selectedTab();
     TabButton * getTab(int index);
     void setColor(const QColor &color);  // Add this line
+    void setLabelText(const QString &text);
 
     signals:
         void tabSelected(int index);

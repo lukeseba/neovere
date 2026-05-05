@@ -329,6 +329,11 @@
 #        fps (int): Frames per second for the output video.
 #
 
+    set_use_frame_buffer(enabled: bool) -> None:
+#    When enabled, set_frame() also writes frames to a shared-memory buffer
+#    for the C++ side to display directly (skipping the video file decode path).
+#    Falls back to disk-only rendering if the buffer can't be allocated.
+
     set_preview_mode(enabled: bool) -> None:
 #    Enable preview mode: skip audio mux, output to preview.mp4 instead of render.mp4.
 
@@ -338,10 +343,6 @@
 
     reset() -> None:
 #    Clear all accumulated frame state and start fresh.
-#
-#    Called at the start of each render cycle so prior runs that errored before
-#    reaching render() don't leave dirty state behind that corrupts the next run.
-#
 
     set_frame(frame_index: int, new_frame: 'Frame') -> None:
 #    Set a frame at a specific index for the output video.

@@ -41,6 +41,12 @@ set(SOURCES main.cpp MaintainFrame.cpp MaintainFrame.h
         SearchTextEdit.h
         ButtonTextEdit.h
         AiTextBoxWrapper.h
+        FrameBufferReader.cpp
+        FrameBufferReader.h
+        PreviewWidget.cpp
+        PreviewWidget.h
+        PlaybackController.cpp
+        PlaybackController.h
 )
 qt_add_resources(SOURCES resources.qrc)
 

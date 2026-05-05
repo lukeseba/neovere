@@ -114,6 +114,13 @@ void TabsWidget::setLabelFont(const QFont &font)
     }
 }
 
+void TabsWidget::setLabelText(const QString &text)
+{
+    if (hasLabel) {
+        nameLabel->setText(text);
+    }
+}
+
 void TabsWidget::updateTabGrid()
 {
     for (int i = 0; i < tabs.size(); ++i) {
