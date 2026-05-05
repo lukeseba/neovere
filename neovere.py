@@ -32,8 +32,8 @@ arial = "/var/folders/r6/f9m8k8sd1b3840csp48x03bm0000gn/T/arial-bold.ttf"
 
 api_key = "" #[%$# #$%]
 gpu_enabled = False
-dx = 1.0
-dt = 1.0
+dx = 0.125
+dt = 0.125
 
 audio_counter = 0
 

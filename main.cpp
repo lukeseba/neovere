@@ -319,7 +319,10 @@ QString readFromFile(const QString& fileName) {
 }
 
 
-void remakeNeoverePy(QStringList &mediaPath) {
+// Optional dx/dt overrides let callers (Run / Export Re-render) regenerate neovere.py with
+// render-quality scales WITHOUT touching settings.txt. Empty strings mean "use settings.txt
+// preview values".
+void remakeNeoverePy(QStringList &mediaPath, const QString& dxOverride = "", const QString& dtOverride = "") {
     QStringList pythonFiles = {
         "header",
         "classes",
@@ -358,6 +361,10 @@ void remakeNeoverePy(QStringList &mediaPath) {
     if (settings.length() > 4 && !settings.at(4).trimmed().isEmpty()) {
         dtValue = settings.at(4).trimmed();
     }
+    // Apply explicit overrides if provided.
+    if (!dxOverride.isEmpty()) dxValue = dxOverride;
+    if (!dtOverride.isEmpty()) dtValue = dtOverride;
+
         fileString.replace("%$#path#$%", allPaths);
         fileString.replace("[%$#arial#$%]", exportFontResourceToFile(":/resources/fonts/arial-bold.ttf"));
         fileString.replace("api_key = \"\" #[%$# #$%]", "api_key = \"" + openaiKey +"\"");
@@ -1322,34 +1329,21 @@ int main(int argc, char *argv[]) {
     // Make run button do a high-quality preview render: output to preview.mp4 (so the
     // unified preview tab shows it), then copy preview.mp4 to render.mp4 for export.
     auto runHighQualityPreview = [&window, codePanel, outputDisplay, mediaHeader, mediaPanel, &mediaPath]() {
-        // Now that the worker is actually starting our Run script, mark it as in-flight
-        // so output streams to the panel (suppression flips off).
         runInFlight = true;
         runQueued = false;
         outputDisplay->appendPlainText("Compiling video ...");
-        // Save current settings so we can restore the preview dx/dt afterwards.
-        QString originalSettings = readFromFile("settings.txt");
-        QStringList lines = originalSettings.split("\n");
-        while (lines.size() < 7) lines.append("");
-        QString renderDx = lines.size() > 5 && !lines[5].trimmed().isEmpty() ? lines[5].trimmed() : "1.0";
-        QString renderDt = lines.size() > 6 && !lines[6].trimmed().isEmpty() ? lines[6].trimmed() : "1.0";
-        // Swap render values into the active dx/dt slots.
-        lines[3] = renderDx;
-        lines[4] = renderDt;
-        QFile sf("settings.txt");
-        if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QTextStream out(&sf); out << lines.join("\n"); sf.close();
-        }
-        remakeNeoverePy(mediaPath);
 
-        // After render finishes: copy preview.mp4 → render.mp4 (for export), then restore
-        // preview dx/dt so subsequent auto-previews go back to fast mode.
-        workerOnFinished = [originalSettings, &mediaPath, outputDisplay](bool success) {
-            QFile sf("settings.txt");
-            if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                QTextStream out(&sf); out << originalSettings; sf.close();
-            }
-            remakeNeoverePy(mediaPath);
+        // Read render dx/dt from settings.txt (lines 5-6), but DON'T modify settings.txt.
+        // Pass them as overrides to remakeNeoverePy so neovere.py uses them for this render.
+        QStringList settings = readFromFile("settings.txt").split("\n");
+        QString renderDx = settings.size() > 5 && !settings.at(5).trimmed().isEmpty() ? settings.at(5).trimmed() : "1.0";
+        QString renderDt = settings.size() > 6 && !settings.at(6).trimmed().isEmpty() ? settings.at(6).trimmed() : "1.0";
+        remakeNeoverePy(mediaPath, renderDx, renderDt);
+
+        // After render: regenerate neovere.py using settings.txt's preview values (no overrides),
+        // then copy preview.mp4 → render.mp4 for export.
+        workerOnFinished = [&mediaPath, outputDisplay](bool success) {
+            remakeNeoverePy(mediaPath);  // back to preview dx/dt from settings.txt
             if (success && QFile::exists("preview.mp4")) {
                 if (QFile::exists("render.mp4")) QFile::remove("render.mp4");
                 QFile::copy("preview.mp4", "render.mp4");
@@ -1492,28 +1486,11 @@ int main(int argc, char *argv[]) {
             copyOver();
         } else if (choice.clickedButton() == rerenderBtn) {
             auto startExportRender = [copyOver, outputDisplay, mediaHeader, mediaPanel, codePanel, &mediaPath]() {
-                // Save original settings, force dx=dt=1.0 for export, regenerate neovere.py
-                QString originalSettings = readFromFile("settings.txt");
-                QStringList lines = originalSettings.split("\n");
-                while (lines.size() < 5) lines.append("");
-                lines[3] = "1.0";
-                lines[4] = "1.0";
-                QFile sf("settings.txt");
-                if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                    QTextStream out(&sf);
-                    out << lines.join("\n");
-                    sf.close();
-                }
-                remakeNeoverePy(mediaPath);
+                // Force full quality (dx=dt=1.0) for export via override — settings.txt is untouched.
+                remakeNeoverePy(mediaPath, "1.0", "1.0");
 
-                workerOnFinished = [copyOver, outputDisplay, originalSettings, &mediaPath](bool success) {
-                    QFile sf("settings.txt");
-                    if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                        QTextStream out(&sf);
-                        out << originalSettings;
-                        sf.close();
-                    }
-                    remakeNeoverePy(mediaPath);
+                workerOnFinished = [copyOver, outputDisplay, &mediaPath](bool success) {
+                    remakeNeoverePy(mediaPath);  // back to preview dx/dt from settings.txt
                     if (success) {
                         copyOver();
                     } else {
