@@ -1108,24 +1108,48 @@ class NonlinearRenderer:
             ordered_writer.release()
 
         if self.__preview_mode:
-            # Preview render: write to preview.mp4. Diagnostic: produce a file structurally
-            # identical to render.mp4 by muxing in a silent audio track via ffmpeg lavfi.
-            # This isolates whether the tab-switch issue is caused by cv2's raw mp4 output
-            # or by Qt's URL-based caching when the same file is rewritten.
+            # Phase 1: produce a Qt-loadable preview.mp4 fast by muxing in cached audio
+            # from the previous render if available, otherwise the silent placeholder.
+            # This means the user hears the previous render's audio immediately on the
+            # visual update (overwritten with the new audio in phase 2 below).
             if os.path.exists("preview.mp4"):
                 os.remove("preview.mp4")
-            result = subprocess.run([
-                "ffmpeg", "-y",
-                "-i", "silent_render.mp4",
-                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                "-shortest",
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "preview.mp4"
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if result.returncode != 0:
+            audio_for_phase1 = "cached_preview_audio.aac" if os.path.exists("cached_preview_audio.aac") else "silent_audio.aac"
+            if os.path.exists(audio_for_phase1):
+                result = subprocess.run([
+                    "ffmpeg", "-y",
+                    "-i", "silent_render.mp4",
+                    "-i", audio_for_phase1,
+                    "-shortest",
+                    "-c:v", "copy",
+                    "-c:a", "copy",
+                    "preview.mp4"
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode != 0:
+                    shutil.copy("silent_render.mp4", "preview.mp4")
+            else:
                 shutil.copy("silent_render.mp4", "preview.mp4")
-            print("Preview compiled as preview.mp4")
+            # Tell C++ to reload — user sees the rendered video with previous audio.
+            print("<<<NEO_VIDEO_READY>>>", flush=True)
+
+            # Phase 2: if the user attached real audio, overwrite preview.mp4 with it,
+            # then cache the resulting audio track for next render's phase 1.
+            if self.__audios:
+                self.__attach_audios("silent_render.mp4", self.__audios, "preview.mp4")
+                # Extract the muxed audio into the cache (fast remux, no re-encode).
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-i", "preview.mp4",
+                    "-vn", "-c:a", "copy",
+                    "cached_preview_audio.aac"
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                print("Preview compiled as preview.mp4 (with audio)")
+            else:
+                # No audio attached this render — invalidate the cache so phase 1 falls
+                # back to silent next time.
+                if os.path.exists("cached_preview_audio.aac"):
+                    os.remove("cached_preview_audio.aac")
+                print("Preview compiled as preview.mp4 (silent)")
         elif self.__audios:
             with _profile("renderer.attach_audios"):
                 self.__attach_audios("silent_render.mp4", self.__audios, "render.mp4")

@@ -400,6 +400,23 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                 isPreviewRender = true;
             } else if (line == "<<<NEO_BEGIN_RUN>>>") {
                 isPreviewRender = false;
+            } else if (line == "<<<NEO_VIDEO_READY>>>") {
+                // First-pass reload: video is ready (audio still being muxed).
+                // Only applies to preview renders right now.
+                if (previewInFlight) {
+                    TabButton* sel = mediaHeader->selectedTab();
+                    if (sel && sel->getData() == "preview.mp4") {
+                        qint64 savedPos = mediaPanel->getPlayer()->position();
+                        bool wasPlaying = mediaPanel->getPlayer()->playbackState() == QMediaPlayer::PlayingState;
+                        for (int i = 0; i < mediaHeader->tabCount(); ++i) {
+                            if (mediaHeader->getTab(i)->getData() == "preview.mp4") {
+                                mediaHeader->selectTab(i);
+                                break;
+                            }
+                        }
+                        mediaPanel->reloadVideo(savedPos, wasPlaying);
+                    }
+                }
             } else if (line == WORKER_DONE_SENTINEL) {
                 // Use previewInFlight (set at dispatch time) as the source of truth.
                 // isPreviewRender depends on the BEGIN marker, which doesn't print when the
@@ -408,14 +425,17 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                 if (wasPreview) {
                     TabButton* sel = mediaHeader->selectedTab();
                     if (sel && sel->getData() == "preview.mp4") {
+                        // Capture position AND playback state BEFORE the selectTab below
+                        // (which fires tabSelected → setVideo and resets both).
                         qint64 savedPos = mediaPanel->getPlayer()->position();
+                        bool wasPlaying = mediaPanel->getPlayer()->playbackState() == QMediaPlayer::PlayingState;
                         for (int i = 0; i < mediaHeader->tabCount(); ++i) {
                             if (mediaHeader->getTab(i)->getData() == "preview.mp4") {
                                 mediaHeader->selectTab(i);
                                 break;
                             }
                         }
-                        mediaPanel->reloadVideo(savedPos);
+                        mediaPanel->reloadVideo(savedPos, wasPlaying);
                     }
                     previewInFlight = false;
                     if (previewPending) {
@@ -493,7 +513,6 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
         "print('<<<NEO_BEGIN_RUN>>>', flush=True)\n"
         "import neovere as _neovere_mod\n"
         "_neovere_mod.renderer.set_preview_mode(False)\n"
-        "_neovere_mod.renderer.reset()\n"
         + code;
     QByteArray scriptBytes = wrapped.toUtf8();
     QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
@@ -515,7 +534,6 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
         "print('<<<NEO_BEGIN_PREVIEW>>>', flush=True)\n"
         "import neovere as _neovere_mod\n"
         "_neovere_mod.renderer.set_preview_mode(True)\n"
-        "_neovere_mod.renderer.reset()\n"
         + code;
     QByteArray scriptBytes = wrapped.toUtf8();
     QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
@@ -1289,21 +1307,21 @@ int main(int argc, char *argv[]) {
         compileCode(code, outputDisplay, mediaHeader, mediaPanel);
     });
 
-    // Auto-preview: dispatch on every keystroke. The dispatchPreview function coalesces —
-    // if a render is already in flight, additional changes just set previewPending=true.
+    // Auto-preview: debounce keystrokes by a short window so rapid edits coalesce into one
+    // render. previewPending also coalesces beyond that window — if a render is already
+    // in flight when more changes come, only the LATEST state will be re-rendered next.
     auto firePreview = [codePanel, outputDisplay, mediaHeader, mediaPanel]() {
         QString code = codePanel->toPlainText();
         if (code.trimmed().isEmpty()) return;
         dispatchPreview(code, outputDisplay, mediaHeader, mediaPanel);
     };
-    QObject::connect(codePanel, &QPlainTextEdit::textChanged, firePreview);
-
-    // Used to defer the pending-preview retry to the next event loop iteration after a render
-    // finishes (so we don't recursively dispatch from inside the completion handler).
     previewDebounceTimer = new QTimer(&window);
     previewDebounceTimer->setSingleShot(true);
-    previewDebounceTimer->setInterval(0);
+    previewDebounceTimer->setInterval(150);
     QObject::connect(previewDebounceTimer, &QTimer::timeout, firePreview);
+    QObject::connect(codePanel, &QPlainTextEdit::textChanged, [&]() {
+        if (previewDebounceTimer) previewDebounceTimer->start();
+    });
 
     // Make the import button import a media file
     QObject::connect(uploadButton, &QPushButton::clicked, [&window, &mediaPath, outputDisplay, mediaPanel, mediaHeader]() {
@@ -1716,6 +1734,20 @@ else:
                 }
             });
         placeholderProcess->start(pythonExecutable, QStringList() << "-c" << placeholderScript);
+    }
+
+    // Pre-generate a silent AAC audio file once. The preview render mux can then
+    // reuse it via -c:a copy instead of regenerating audio per render.
+    if (!QFile::exists("silent_audio.aac")) {
+        QProcess silentAudioProc;
+        silentAudioProc.start("ffmpeg", QStringList()
+            << "-y"
+            << "-f" << "lavfi"
+            << "-i" << "anullsrc=r=44100:cl=stereo"
+            << "-t" << "3600"
+            << "-c:a" << "aac"
+            << "silent_audio.aac");
+        silentAudioProc.waitForFinished(15000);
     }
 
     // Spawn the persistent Python worker eagerly so passive previews work

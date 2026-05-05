@@ -14,6 +14,7 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QDateTime>
+#include <QTimer>
 
 MediaFrame::MediaFrame(QWidget *parent)
     : MaintainFrame(16, 9, parent),
@@ -35,13 +36,10 @@ videoWidget(new QVideoWidget(this)) {
     // get media resolution when media is changed
     QObject::connect(&mediaPlayer, &QMediaPlayer::mediaStatusChanged, [&](QMediaPlayer::MediaStatus status) {
         if (status == QMediaPlayer::LoadedMedia) {
-            // get resolution from metadata
             QSize resolution = mediaPlayer.metaData().value(QMediaMetaData::Resolution).toSize();
             if (resolution.isValid()) {
                 aspectWidth = resolution.width();
                 aspectHeight = resolution.height();
-
-                // dont ask
                 resize(width()+1, height());
                 resize(width()-1, height());
             } else {
@@ -49,10 +47,9 @@ videoWidget(new QVideoWidget(this)) {
             }
         } else if (status == QMediaPlayer::InvalidMedia) {
             qDebug() << "Invalid media:" << mediaPlayer.source() << "-" << mediaPlayer.errorString();
-        } else if (status == QMediaPlayer::NoMedia) {
-            qDebug() << "No media source set";
         }
     });
+
 
     QObject::connect(&mediaPlayer, &QMediaPlayer::errorOccurred, [&](QMediaPlayer::Error error, const QString &errorString) {
         qDebug() << "Media player error" << error << ":" << errorString << "| source:" << mediaPlayer.source();
@@ -77,14 +74,25 @@ QMediaPlayer* MediaFrame::getPlayer() {
     return &mediaPlayer;
 }
 
-void MediaFrame::reloadVideo(qint64 seekToMs) {
+void MediaFrame::reloadVideo(qint64 seekToMs, bool resumePlaying) {
     const QUrl source = mediaPlayer.source();
     setVideo("");
     mediaPlayer.setSource(source);
-    mediaPlayer.setPosition(seekToMs);
-    mediaPlayer.play();
-    mediaPlayer.pause();
-    pauseVideo();
+    // Defer the seek + play kick to give Qt time to actually load the new source.
+    // Calling setPosition() immediately after setSource() is silently dropped because
+    // the file isn't ready yet. 150ms is plenty for a small preview.mp4 on Apple Silicon.
+    QTimer::singleShot(150, this, [this, seekToMs, resumePlaying]() {
+        mediaPlayer.setPosition(seekToMs);
+        if (resumePlaying) {
+            playVideo();
+        } else {
+            // Briefly play to force the decoder to present the seeked frame.
+            // The playbackStateChanged handler in the constructor auto-pauses
+            // because isPaused stays true.
+            isPaused = true;
+            mediaPlayer.play();
+        }
+    });
 }
 
 void MediaFrame::setVideo(const QString &filePath) {
@@ -93,10 +101,6 @@ void MediaFrame::setVideo(const QString &filePath) {
     } else {
         mediaPlayer.setSource(QUrl::fromLocalFile(QFileInfo(filePath).absoluteFilePath()));
         mediaPlayer.setPosition(0);
-        // Force the decoder to actually produce the first frame. Without this kick,
-        // Qt's paused player can sometimes display black until the user hits play.
-        mediaPlayer.play();
-        mediaPlayer.pause();
         pauseVideo();
     }
 }
