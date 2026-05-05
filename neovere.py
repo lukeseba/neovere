@@ -32,8 +32,8 @@ arial = "/var/folders/r6/f9m8k8sd1b3840csp48x03bm0000gn/T/arial-bold.ttf"
 
 api_key = "" #[%$# #$%]
 gpu_enabled = False
-dx = 0.125
-dt = 0.125
+dx = 1.0
+dt = 1.0
 
 audio_counter = 0
 
@@ -988,10 +988,16 @@ class NonlinearRenderer:
         self.__in_order = True
         self.__expected_next = 0
         self.__preview_mode = False
+        self.__show_previews = False
 
     def set_preview_mode(self, enabled: bool) -> None:
         """Enable preview mode: skip audio mux, output to preview.mp4 instead of render.mp4."""
         self.__preview_mode = enabled
+
+    def set_show_previews(self, enabled: bool) -> None:
+        """When enabled, set_frame() also calls new_frame.preview() so the user sees each
+        frame as it's added to the render. Used by the Run button for live progress display."""
+        self.__show_previews = enabled
 
     def reset(self) -> None:
         """Clear all accumulated frame state and start fresh.
@@ -1035,6 +1041,8 @@ class NonlinearRenderer:
             write_pixels = np.asnumpy(write_pixels)
         with _profile("renderer.set_frame.write"):
             self.__unordered_writer.write(write_pixels)
+        if self.__show_previews:
+            new_frame.preview()
         self.__max_frame_index = max(self.__max_frame_index, frame_index)
 
         # Track whether frames were appended sequentially (0, 1, 2, ...) with no gaps
