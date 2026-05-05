@@ -13,6 +13,7 @@
 #include <QMediaMetaData>
 #include <QDebug>
 #include <QFileInfo>
+#include <QDateTime>
 
 MediaFrame::MediaFrame(QWidget *parent)
     : MaintainFrame(16, 9, parent),
@@ -76,11 +77,13 @@ QMediaPlayer* MediaFrame::getPlayer() {
     return &mediaPlayer;
 }
 
-void MediaFrame::reloadVideo() {
+void MediaFrame::reloadVideo(qint64 seekToMs) {
     const QUrl source = mediaPlayer.source();
     setVideo("");
     mediaPlayer.setSource(source);
-    mediaPlayer.setPosition(0);
+    mediaPlayer.setPosition(seekToMs);
+    mediaPlayer.play();
+    mediaPlayer.pause();
     pauseVideo();
 }
 
@@ -90,6 +93,10 @@ void MediaFrame::setVideo(const QString &filePath) {
     } else {
         mediaPlayer.setSource(QUrl::fromLocalFile(QFileInfo(filePath).absoluteFilePath()));
         mediaPlayer.setPosition(0);
+        // Force the decoder to actually produce the first frame. Without this kick,
+        // Qt's paused player can sometimes display black until the user hits play.
+        mediaPlayer.play();
+        mediaPlayer.pause();
         pauseVideo();
     }
 }

@@ -907,6 +907,29 @@ class NonlinearRenderer:
         self.__audios: List[tuple['Audio', float]] = []
         self.__in_order = True
         self.__expected_next = 0
+        self.__preview_mode = False
+
+    def set_preview_mode(self, enabled: bool) -> None:
+        """Enable preview mode: skip audio mux, output to preview.mp4 instead of render.mp4."""
+        self.__preview_mode = enabled
+
+    def reset(self) -> None:
+        """Clear all accumulated frame state and start fresh.
+
+        Called at the start of each render cycle so prior runs that errored before
+        reaching render() don't leave dirty state behind that corrupts the next run.
+        """
+        self.__frame_indices = []
+        self.__max_frame_index = -1
+        self.__in_order = True
+        self.__expected_next = 0
+        self.__audios = []
+        self.__unordered_writer = cv2.VideoWriter(
+            "unordered_render.mp4",
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            self.__fps,
+            (self.__width, self.__height)
+        )
 
     def set_frame(self, frame_index: int, new_frame: 'Frame') -> None:
         """Set a frame at a specific index for the output video.
@@ -1084,7 +1107,26 @@ class NonlinearRenderer:
             unordered_render.release()
             ordered_writer.release()
 
-        if self.__audios:
+        if self.__preview_mode:
+            # Preview render: write to preview.mp4. Diagnostic: produce a file structurally
+            # identical to render.mp4 by muxing in a silent audio track via ffmpeg lavfi.
+            # This isolates whether the tab-switch issue is caused by cv2's raw mp4 output
+            # or by Qt's URL-based caching when the same file is rewritten.
+            if os.path.exists("preview.mp4"):
+                os.remove("preview.mp4")
+            result = subprocess.run([
+                "ffmpeg", "-y",
+                "-i", "silent_render.mp4",
+                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-shortest",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "preview.mp4"
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                shutil.copy("silent_render.mp4", "preview.mp4")
+            print("Preview compiled as preview.mp4")
+        elif self.__audios:
             with _profile("renderer.attach_audios"):
                 self.__attach_audios("silent_render.mp4", self.__audios, "render.mp4")
             print("Video compiled with audio as render.mp4")

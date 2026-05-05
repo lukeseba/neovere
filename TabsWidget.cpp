@@ -34,6 +34,7 @@ TabsWidget::TabsWidget(bool includeLabel, bool buttonStyleTabs, QWidget *parent)
 }
 
 TabButton * TabsWidget::selectedTab() {
+    if (selectedTabIndex < 0 || selectedTabIndex >= tabs.size()) return nullptr;
     return tabs.at(selectedTabIndex);
 }
 

@@ -329,6 +329,16 @@
 #        fps (int): Frames per second for the output video.
 #
 
+    set_preview_mode(enabled: bool) -> None:
+#    Enable preview mode: skip audio mux, output to preview.mp4 instead of render.mp4.
+
+    reset() -> None:
+#    Clear all accumulated frame state and start fresh.
+#
+#    Called at the start of each render cycle so prior runs that errored before
+#    reaching render() don't leave dirty state behind that corrupts the next run.
+#
+
     set_frame(frame_index: int, new_frame: 'Frame') -> None:
 #    Set a frame at a specific index for the output video.
 #

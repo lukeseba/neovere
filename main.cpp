@@ -53,6 +53,10 @@ QProcess* process = nullptr;
 QProcess* pythonWorker = nullptr;
 QByteArray workerOutBuffer;
 std::function<void(bool)> workerOnFinished;
+bool isPreviewRender = false;            // current render is an auto-preview (suppress output, write preview.mp4)
+bool previewInFlight = false;            // an auto-preview is currently being rendered by the worker
+bool previewPending = false;             // user typed during a preview render → re-render after current finishes
+QTimer* previewDebounceTimer = nullptr;
 static const char* WORKER_DONE_SENTINEL = "<<<NEO_DONE>>>";
 static const char* WORKER_SCRIPT = R"PYTHON(
 import sys, importlib, os
@@ -79,6 +83,16 @@ while True:
                 importlib.reload(sys.modules['neovere'])
         except Exception as e:
             print(f"[worker] reload check failed: {e}")
+
+    # Reset renderer state BEFORE compiling/executing user code, so that even if the user
+    # script fails with a SyntaxError (which prevents the wrapper from running), the next
+    # successful render starts from a clean slate.
+    if 'neovere' in sys.modules:
+        try:
+            sys.modules['neovere'].renderer.reset()
+        except Exception:
+            pass
+
     try:
         exec(script, {'__name__': '__main__'})
     except Exception:
@@ -382,15 +396,44 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
             // Trim trailing \r if present
             if (!line.isEmpty() && line.endsWith('\r')) line.chop(1);
 
-            if (line == WORKER_DONE_SENTINEL) {
-                mediaHeader->selectTab(0);
-                mediaPanel->reloadVideo();
+            if (line == "<<<NEO_BEGIN_PREVIEW>>>") {
+                isPreviewRender = true;
+            } else if (line == "<<<NEO_BEGIN_RUN>>>") {
+                isPreviewRender = false;
+            } else if (line == WORKER_DONE_SENTINEL) {
+                // Use previewInFlight (set at dispatch time) as the source of truth.
+                // isPreviewRender depends on the BEGIN marker, which doesn't print when the
+                // user's script fails with a SyntaxError (compile-time error).
+                bool wasPreview = previewInFlight;
+                if (wasPreview) {
+                    TabButton* sel = mediaHeader->selectedTab();
+                    if (sel && sel->getData() == "preview.mp4") {
+                        qint64 savedPos = mediaPanel->getPlayer()->position();
+                        for (int i = 0; i < mediaHeader->tabCount(); ++i) {
+                            if (mediaHeader->getTab(i)->getData() == "preview.mp4") {
+                                mediaHeader->selectTab(i);
+                                break;
+                            }
+                        }
+                        mediaPanel->reloadVideo(savedPos);
+                    }
+                    previewInFlight = false;
+                    if (previewPending) {
+                        previewPending = false;
+                        if (previewDebounceTimer) previewDebounceTimer->start(0);
+                    }
+                } else {
+                    // Explicit render via Run button: jump to render tab and reload.
+                    mediaHeader->selectTab(0);
+                    mediaPanel->reloadVideo();
+                }
+                isPreviewRender = false;
                 if (workerOnFinished) {
                     auto cb = workerOnFinished;
                     workerOnFinished = nullptr;
                     cb(true);
                 }
-            } else {
+            } else if (!isPreviewRender && !previewInFlight) {
                 outputDisplay->appendPlainText(QString::fromUtf8(line));
             }
         }
@@ -398,7 +441,7 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
 
     QObject::connect(pythonWorker, &QProcess::readyReadStandardError, [outputDisplay]() {
         QString err = QString::fromUtf8(pythonWorker->readAllStandardError());
-        if (!err.isEmpty()) outputDisplay->appendPlainText(err.trimmed());
+        if (!err.isEmpty() && !previewInFlight) outputDisplay->appendPlainText(err.trimmed());
     });
 
     QObject::connect(pythonWorker, &QProcess::errorOccurred, [outputDisplay](QProcess::ProcessError error) {
@@ -406,12 +449,21 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
     });
 
     QObject::connect(pythonWorker, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-        [outputDisplay](int exitCode, QProcess::ExitStatus) {
-            outputDisplay->appendPlainText(QString("Worker exited (code %1). It will be respawned on next render.").arg(exitCode));
+        [outputDisplay, mediaHeader, mediaPanel](int exitCode, QProcess::ExitStatus) {
+            outputDisplay->appendPlainText(QString("Worker exited (code %1). Respawning...").arg(exitCode));
+            // If a preview was in flight when the worker died, unstick the pipeline so future previews dispatch.
+            previewInFlight = false;
+            isPreviewRender = false;
             if (workerOnFinished) {
                 auto cb = workerOnFinished;
                 workerOnFinished = nullptr;
                 cb(false);
+            }
+            // Respawn so the user doesn't have to click Run to recover.
+            startPythonWorker(outputDisplay, mediaHeader, mediaPanel);
+            if (previewPending) {
+                previewPending = false;
+                if (previewDebounceTimer) previewDebounceTimer->start(0);
             }
         });
 
@@ -437,7 +489,35 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
 
     outputDisplay->appendPlainText("Compiling video ...");
 
-    QByteArray scriptBytes = code.toUtf8();
+    QString wrapped =
+        "print('<<<NEO_BEGIN_RUN>>>', flush=True)\n"
+        "import neovere as _neovere_mod\n"
+        "_neovere_mod.renderer.set_preview_mode(False)\n"
+        "_neovere_mod.renderer.reset()\n"
+        + code;
+    QByteArray scriptBytes = wrapped.toUtf8();
+    QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
+    pythonWorker->write(header);
+    pythonWorker->write(scriptBytes);
+}
+
+void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, MediaFrame* mediaPanel) {
+    if (!pythonWorker || pythonWorker->state() != QProcess::Running) {
+        return;
+    }
+    if (previewInFlight) {
+        previewPending = true;
+        return;
+    }
+    previewInFlight = true;
+
+    QString wrapped =
+        "print('<<<NEO_BEGIN_PREVIEW>>>', flush=True)\n"
+        "import neovere as _neovere_mod\n"
+        "_neovere_mod.renderer.set_preview_mode(True)\n"
+        "_neovere_mod.renderer.reset()\n"
+        + code;
+    QByteArray scriptBytes = wrapped.toUtf8();
     QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
     pythonWorker->write(header);
     pythonWorker->write(scriptBytes);
@@ -973,7 +1053,13 @@ int main(int argc, char *argv[]) {
     mediaHeader->setLabelFont(dotim7);
     importMedia("render.mp4", mediaPath, codePanel, mediaHeader);
     mediaHeader->getTab(0)->closeable = false;
-    mediaHeader->addTab("preview", "render.mp4", false);
+    // Seed preview.mp4 from render.mp4 on first launch so the preview tab has something to show
+    // before the first auto-preview render completes.
+    if (!QFile::exists("preview.mp4") && QFile::exists("render.mp4")) {
+        QFile::copy("render.mp4", "preview.mp4");
+    }
+    mediaHeader->addTab("preview", "preview.mp4", false);
+    mediaHeader->selectTab(0);
 
 
     // create media panel
@@ -1198,9 +1284,26 @@ int main(int argc, char *argv[]) {
 
     // Make run button run python code
     QObject::connect(runButton, &QPushButton::clicked, [mediaHeader, outputDisplay, codePanel, mediaPanel]() {
+        previewPending = false;
         QString code = codePanel->toPlainText();
         compileCode(code, outputDisplay, mediaHeader, mediaPanel);
     });
+
+    // Auto-preview: dispatch on every keystroke. The dispatchPreview function coalesces —
+    // if a render is already in flight, additional changes just set previewPending=true.
+    auto firePreview = [codePanel, outputDisplay, mediaHeader, mediaPanel]() {
+        QString code = codePanel->toPlainText();
+        if (code.trimmed().isEmpty()) return;
+        dispatchPreview(code, outputDisplay, mediaHeader, mediaPanel);
+    };
+    QObject::connect(codePanel, &QPlainTextEdit::textChanged, firePreview);
+
+    // Used to defer the pending-preview retry to the next event loop iteration after a render
+    // finishes (so we don't recursively dispatch from inside the completion handler).
+    previewDebounceTimer = new QTimer(&window);
+    previewDebounceTimer->setSingleShot(true);
+    previewDebounceTimer->setInterval(0);
+    QObject::connect(previewDebounceTimer, &QTimer::timeout, firePreview);
 
     // Make the import button import a media file
     QObject::connect(uploadButton, &QPushButton::clicked, [&window, &mediaPath, outputDisplay, mediaPanel, mediaHeader]() {
@@ -1606,11 +1709,18 @@ else:
             [mediaPanel, outputDisplay](int exitCode, QProcess::ExitStatus) {
                 outputDisplay->appendPlainText(QString("[placeholder] finished exit=%1").arg(exitCode));
                 if (exitCode == 0) {
+                    if (!QFile::exists("preview.mp4") && QFile::exists("render.mp4")) {
+                        QFile::copy("render.mp4", "preview.mp4");
+                    }
                     mediaPanel->reloadVideo();
                 }
             });
         placeholderProcess->start(pythonExecutable, QStringList() << "-c" << placeholderScript);
     }
+
+    // Spawn the persistent Python worker eagerly so passive previews work
+    // before the user clicks Run for the first time.
+    startPythonWorker(outputDisplay, mediaHeader, mediaPanel);
 
     // Show the window
     window.show();
