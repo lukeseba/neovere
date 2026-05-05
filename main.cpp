@@ -2,7 +2,6 @@
 #include <fstream>
 #include <regex>
 #include <functional>
-#include <signal.h>
 
 #include <QApplication>
 #include <QWidget>
@@ -57,8 +56,6 @@ std::function<void(bool)> workerOnFinished;
 bool isPreviewRender = false;            // current render is an auto-preview (suppress output, write preview.mp4)
 bool previewInFlight = false;            // an auto-preview is currently being rendered by the worker
 bool previewPending = false;             // user typed during a preview render → re-render after current finishes
-bool runInFlight = false;                // worker is currently running a Run-button script (output should show)
-bool runQueued = false;                  // user clicked Run; will dispatch once any current preview finishes
 QTimer* previewDebounceTimer = nullptr;
 static const char* WORKER_DONE_SENTINEL = "<<<NEO_DONE>>>";
 static const char* WORKER_SCRIPT = R"PYTHON(
@@ -98,9 +95,6 @@ while True:
 
     try:
         exec(script, {'__name__': '__main__'})
-    except KeyboardInterrupt:
-        # Aborted by SIGINT (e.g. Run button interrupting an auto-preview). Just continue.
-        pass
     except Exception:
         import traceback
         traceback.print_exc()
@@ -459,7 +453,7 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                     workerOnFinished = nullptr;
                     cb(true);
                 }
-            } else if (runInFlight || (!isPreviewRender && !previewInFlight)) {
+            } else if (!isPreviewRender && !previewInFlight) {
                 outputDisplay->appendPlainText(QString::fromUtf8(line));
             }
         }
@@ -467,7 +461,7 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
 
     QObject::connect(pythonWorker, &QProcess::readyReadStandardError, [outputDisplay]() {
         QString err = QString::fromUtf8(pythonWorker->readAllStandardError());
-        if (!err.isEmpty() && (runInFlight || !previewInFlight)) outputDisplay->appendPlainText(err.trimmed());
+        if (!err.isEmpty() && !previewInFlight) outputDisplay->appendPlainText(err.trimmed());
     });
 
     QObject::connect(pythonWorker, &QProcess::errorOccurred, [outputDisplay](QProcess::ProcessError error) {
@@ -519,7 +513,6 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
         "print('<<<NEO_BEGIN_RUN>>>', flush=True)\n"
         "import neovere as _neovere_mod\n"
         "_neovere_mod.renderer.set_preview_mode(False)\n"
-        "_neovere_mod.renderer.set_show_previews(True)\n"
         + code;
     QByteArray scriptBytes = wrapped.toUtf8();
     QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
@@ -532,11 +525,6 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
         return;
     }
     if (previewInFlight) {
-        // Abort the in-flight auto-preview so we can render the latest code sooner.
-        // Don't interrupt a Run — those are user-initiated and shouldn't be discarded.
-        if (!runInFlight && pythonWorker->processId() > 0) {
-            ::kill(static_cast<pid_t>(pythonWorker->processId()), SIGINT);
-        }
         previewPending = true;
         return;
     }
@@ -546,7 +534,6 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
         "print('<<<NEO_BEGIN_PREVIEW>>>', flush=True)\n"
         "import neovere as _neovere_mod\n"
         "_neovere_mod.renderer.set_preview_mode(True)\n"
-        "_neovere_mod.renderer.set_show_previews(" + QString(runInFlight ? "True" : "False") + ")\n"
         + code;
     QByteArray scriptBytes = wrapped.toUtf8();
     QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
@@ -970,8 +957,7 @@ int main(int argc, char *argv[]) {
         QFile defaultSettings("settings.txt");
         if (defaultSettings.open(QIODevice::WriteOnly | QIODevice::Text)) {
             QTextStream out(&defaultSettings);
-            // lines: openai_key, gpu_enabled, python_path, preview_dx, preview_dt, render_dx, render_dt
-            out << "\n0\n\n0.25\n0.25\n1.0\n1.0\n";
+            out << "\n0\n\n1.0\n1.0\n";
             defaultSettings.close();
         }
     }
@@ -1083,19 +1069,14 @@ int main(int argc, char *argv[]) {
     mediaHeader->setColor(nvMid);
     mediaHeader->setTabsFont(dotim5);
     mediaHeader->setLabelFont(dotim7);
-    // render.mp4 stays in mediaPath so user scripts can reference media["render"],
-    // but we don't show a separate tab for it — the unified "preview" tab below
-    // shows whatever was rendered last (auto-preview OR explicit Run).
-    mediaPath.append("render.mp4");
-    remakeNeoverePy(mediaPath);
-
-    // Seed preview.mp4 from render.mp4 on first launch so the preview tab has something
-    // to show before the first auto-preview render completes.
+    importMedia("render.mp4", mediaPath, codePanel, mediaHeader);
+    mediaHeader->getTab(0)->closeable = false;
+    // Seed preview.mp4 from render.mp4 on first launch so the preview tab has something to show
+    // before the first auto-preview render completes.
     if (!QFile::exists("preview.mp4") && QFile::exists("render.mp4")) {
         QFile::copy("render.mp4", "preview.mp4");
     }
     mediaHeader->addTab("preview", "preview.mp4", false);
-    mediaHeader->getTab(0)->closeable = false;
     mediaHeader->selectTab(0);
 
 
@@ -1319,66 +1300,11 @@ int main(int argc, char *argv[]) {
         }
     });
 
-    // Make run button do a high-quality preview render: output to preview.mp4 (so the
-    // unified preview tab shows it), then copy preview.mp4 to render.mp4 for export.
-    auto runHighQualityPreview = [&window, codePanel, outputDisplay, mediaHeader, mediaPanel, &mediaPath]() {
-        // Now that the worker is actually starting our Run script, mark it as in-flight
-        // so output streams to the panel (suppression flips off).
-        runInFlight = true;
-        runQueued = false;
-        outputDisplay->appendPlainText("Compiling video ...");
-        // Save current settings so we can restore the preview dx/dt afterwards.
-        QString originalSettings = readFromFile("settings.txt");
-        QStringList lines = originalSettings.split("\n");
-        while (lines.size() < 7) lines.append("");
-        QString renderDx = lines.size() > 5 && !lines[5].trimmed().isEmpty() ? lines[5].trimmed() : "1.0";
-        QString renderDt = lines.size() > 6 && !lines[6].trimmed().isEmpty() ? lines[6].trimmed() : "1.0";
-        // Swap render values into the active dx/dt slots.
-        lines[3] = renderDx;
-        lines[4] = renderDt;
-        QFile sf("settings.txt");
-        if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QTextStream out(&sf); out << lines.join("\n"); sf.close();
-        }
-        remakeNeoverePy(mediaPath);
-
-        // After render finishes: copy preview.mp4 → render.mp4 (for export), then restore
-        // preview dx/dt so subsequent auto-previews go back to fast mode.
-        workerOnFinished = [originalSettings, &mediaPath, outputDisplay](bool success) {
-            QFile sf("settings.txt");
-            if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                QTextStream out(&sf); out << originalSettings; sf.close();
-            }
-            remakeNeoverePy(mediaPath);
-            if (success && QFile::exists("preview.mp4")) {
-                if (QFile::exists("render.mp4")) QFile::remove("render.mp4");
-                QFile::copy("preview.mp4", "render.mp4");
-                outputDisplay->appendPlainText("Render complete (saved as render.mp4)");
-            }
-            runInFlight = false;
-        };
-
-        QString code = codePanel->toPlainText();
-        dispatchPreview(code, outputDisplay, mediaHeader, mediaPanel);
-    };
-
-    QObject::connect(runButton, &QPushButton::clicked, [runHighQualityPreview]() {
-        if (runQueued || runInFlight) return;  // already queued or running
-        runQueued = true;
+    // Make run button run python code
+    QObject::connect(runButton, &QPushButton::clicked, [mediaHeader, outputDisplay, codePanel, mediaPanel]() {
         previewPending = false;
-        if (previewDebounceTimer) previewDebounceTimer->stop();
-        if (previewInFlight) {
-            // Interrupt the in-flight auto-preview by sending SIGINT to the worker.
-            // The worker catches KeyboardInterrupt, prints DONE, and processes our Run next.
-            // Do NOT interrupt if it's actually a Run that's running (runInFlight).
-            if (!runInFlight && pythonWorker && pythonWorker->processId() > 0) {
-                ::kill(static_cast<pid_t>(pythonWorker->processId()), SIGINT);
-            }
-            // workerOnFinished fires when the (interrupted) preview prints DONE.
-            workerOnFinished = [runHighQualityPreview](bool) { runHighQualityPreview(); };
-        } else {
-            runHighQualityPreview();
-        }
+        QString code = codePanel->toPlainText();
+        compileCode(code, outputDisplay, mediaHeader, mediaPanel);
     });
 
     // Auto-preview: debounce keystrokes by a short window so rapid edits coalesce into one
@@ -1491,51 +1417,38 @@ int main(int argc, char *argv[]) {
         if (choice.clickedButton() == useLastBtn) {
             copyOver();
         } else if (choice.clickedButton() == rerenderBtn) {
-            auto startExportRender = [copyOver, outputDisplay, mediaHeader, mediaPanel, codePanel, &mediaPath]() {
-                // Save original settings, force dx=dt=1.0 for export, regenerate neovere.py
-                QString originalSettings = readFromFile("settings.txt");
-                QStringList lines = originalSettings.split("\n");
-                while (lines.size() < 5) lines.append("");
-                lines[3] = "1.0";
-                lines[4] = "1.0";
+            // Save original settings, force dx=dt=1.0 for export, regenerate neovere.py
+            QString originalSettings = readFromFile("settings.txt");
+            QStringList lines = originalSettings.split("\n");
+            while (lines.size() < 5) lines.append("");
+            lines[3] = "1.0";
+            lines[4] = "1.0";
+            QFile sf("settings.txt");
+            if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&sf);
+                out << lines.join("\n");
+                sf.close();
+            }
+            remakeNeoverePy(mediaPath);
+
+            QString code = codePanel->toPlainText();
+            workerOnFinished = [copyOver, outputDisplay, originalSettings, &mediaPath](bool success) {
+                // Restore preview settings
                 QFile sf("settings.txt");
                 if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
                     QTextStream out(&sf);
-                    out << lines.join("\n");
+                    out << originalSettings;
                     sf.close();
                 }
                 remakeNeoverePy(mediaPath);
 
-                workerOnFinished = [copyOver, outputDisplay, originalSettings, &mediaPath](bool success) {
-                    QFile sf("settings.txt");
-                    if (sf.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                        QTextStream out(&sf);
-                        out << originalSettings;
-                        sf.close();
-                    }
-                    remakeNeoverePy(mediaPath);
-                    if (success) {
-                        copyOver();
-                    } else {
-                        outputDisplay->appendPlainText("Re-render failed; export aborted.");
-                    }
-                };
-
-                QString code = codePanel->toPlainText();
-                compileCode(code, outputDisplay, mediaHeader, mediaPanel);
-            };
-
-            // If a preview is in flight, abort it (SIGINT) and wait for its DONE before
-            // starting the export. Otherwise the export's settings swap + workerOnFinished
-            // get consumed by the wrong DONE.
-            if (previewInFlight) {
-                if (!runInFlight && pythonWorker && pythonWorker->processId() > 0) {
-                    ::kill(static_cast<pid_t>(pythonWorker->processId()), SIGINT);
+                if (success) {
+                    copyOver();
+                } else {
+                    outputDisplay->appendPlainText("Re-render failed; export aborted.");
                 }
-                workerOnFinished = [startExportRender](bool) { startExportRender(); };
-            } else {
-                startExportRender();
-            }
+            };
+            compileCode(code, outputDisplay, mediaHeader, mediaPanel);
         }
     });
 
@@ -1544,10 +1457,8 @@ int main(int argc, char *argv[]) {
         QString currentKey;
         bool currentGpuEnabled = false;
         QString currentPythonPath;
-        QString currentDx = "0.25";
-        QString currentDt = "0.25";
-        QString currentRenderDx = "1.0";
-        QString currentRenderDt = "1.0";
+        QString currentDx = "1.0";
+        QString currentDt = "1.0";
         QFile settingsFile("settings.txt");
         if (settingsFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
             QTextStream in(&settingsFile);
@@ -1556,12 +1467,8 @@ int main(int argc, char *argv[]) {
             currentPythonPath = in.readLine().trimmed();
             QString dxLine = in.readLine().trimmed();
             QString dtLine = in.readLine().trimmed();
-            QString rdxLine = in.readLine().trimmed();
-            QString rdtLine = in.readLine().trimmed();
             if (!dxLine.isEmpty()) currentDx = dxLine;
             if (!dtLine.isEmpty()) currentDt = dtLine;
-            if (!rdxLine.isEmpty()) currentRenderDx = rdxLine;
-            if (!rdtLine.isEmpty()) currentRenderDt = rdtLine;
             settingsFile.close();
         }
 
@@ -1607,28 +1514,6 @@ int main(int argc, char *argv[]) {
         }
         layout->addWidget(dtCombo);
 
-        layout->addWidget(new QLabel("Render resolution scale (dx):"));
-        QComboBox* renderDxCombo = new QComboBox();
-        renderDxCombo->addItem("Full (1.0)", "1.0");
-        renderDxCombo->addItem("Half (0.5)", "0.5");
-        renderDxCombo->addItem("Quarter (0.25)", "0.25");
-        renderDxCombo->addItem("Eighth (0.125)", "0.125");
-        for (int i = 0; i < renderDxCombo->count(); ++i) {
-            if (renderDxCombo->itemData(i).toString() == currentRenderDx) { renderDxCombo->setCurrentIndex(i); break; }
-        }
-        layout->addWidget(renderDxCombo);
-
-        layout->addWidget(new QLabel("Render fps scale (dt):"));
-        QComboBox* renderDtCombo = new QComboBox();
-        renderDtCombo->addItem("Full (1.0)", "1.0");
-        renderDtCombo->addItem("Half (0.5)", "0.5");
-        renderDtCombo->addItem("Quarter (0.25)", "0.25");
-        renderDtCombo->addItem("Eighth (0.125)", "0.125");
-        for (int i = 0; i < renderDtCombo->count(); ++i) {
-            if (renderDtCombo->itemData(i).toString() == currentRenderDt) { renderDtCombo->setCurrentIndex(i); break; }
-        }
-        layout->addWidget(renderDtCombo);
-
         QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
         layout->addWidget(buttonBox);
 
@@ -1641,8 +1526,6 @@ int main(int argc, char *argv[]) {
             QString pythonPath = pythonPathInput->text().trimmed();
             QString dxValue = dxCombo->currentData().toString();
             QString dtValue = dtCombo->currentData().toString();
-            QString renderDxValue = renderDxCombo->currentData().toString();
-            QString renderDtValue = renderDtCombo->currentData().toString();
 
             openaiKey = key;
 
@@ -1658,10 +1541,6 @@ int main(int argc, char *argv[]) {
                 out << dxValue;
                 out << "\n";
                 out << dtValue;
-                out << "\n";
-                out << renderDxValue;
-                out << "\n";
-                out << renderDtValue;
                 outFile.close();
             } else {
                 QMessageBox::critical(nullptr, "Error", "Failed to save settings.");
