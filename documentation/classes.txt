@@ -332,6 +332,10 @@
     set_preview_mode(enabled: bool) -> None:
 #    Enable preview mode: skip audio mux, output to preview.mp4 instead of render.mp4.
 
+    set_show_previews(enabled: bool) -> None:
+#    When enabled, set_frame() also calls new_frame.preview() so the user sees each
+#    frame as it's added to the render. Used by the Run button for live progress display.
+
     reset() -> None:
 #    Clear all accumulated frame state and start fresh.
 #
