@@ -375,7 +375,7 @@ class Video:
             except Exception:
                 free_ram = 4 * 1024 ** 3  # 4 GB last-resort assumption
 
-        budget = int(free_ram * 0.5)  # don't take more than half of available RAM
+        budget = int(free_ram * 0.3)  # leave headroom for Python interpreter + per-frame buffers
 
         # Pick storage format
         if raw_total <= budget:
