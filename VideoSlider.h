@@ -33,10 +33,12 @@ private:
     QTimer* videoUpdateTimer;
     bool vidUpdate;
     bool manualSliderUpdate;
+    bool wasPlayingBeforeInteraction; // <--- Tracks state before click/drag
     QPushButton *button{};
     QColor filledColor = QColor(185, 205, 230);
     QColor backgroundBaseColor = QColor(120, 130, 150);
-    QString convertToTimestamp(int position) const;
+
+    static QString convertToTimestamp(int seconds);
 };
 
 #endif // VIDEOSLIDER_H

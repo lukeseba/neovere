@@ -661,17 +661,23 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
     QObject::connect(pythonWorker, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
         [outputDisplay, mediaHeader, mediaPanel](int exitCode, QProcess::ExitStatus) {
             outputDisplay->appendPlainText(QString("Worker exited (code %1). Respawning...").arg(exitCode));
-            // If a preview was in flight when the worker died, unstick the pipeline so future previews dispatch.
+
+            // Clear flags
             previewInFlight = false;
             isPreviewRender = false;
             updatePreviewTabLabel(false);
+
+            // 1. Respawn FIRST so the worker is running for any subsequent callbacks
+            startPythonWorker(outputDisplay, mediaHeader, mediaPanel);
+
+            // 2. Fire any pending explicit commands (Run/Export)
             if (workerOnFinished) {
                 auto cb = workerOnFinished;
                 workerOnFinished = nullptr;
                 cb(false);
             }
-            // Respawn so the user doesn't have to click Run to recover.
-            startPythonWorker(outputDisplay, mediaHeader, mediaPanel);
+
+            // 3. Fire any pending debounced previews
             if (previewPending) {
                 previewPending = false;
                 if (previewDebounceTimer) previewDebounceTimer->start(0);
@@ -717,16 +723,18 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
         return;
     }
     if (previewInFlight) {
-        // Abort the in-flight auto-preview so we can render the latest code sooner.
-        // Don't interrupt a Run — those are user-initiated and shouldn't be discarded.
-        if (!runInFlight && pythonWorker->processId() > 0) {
-            sendInterruptToWorker(pythonWorker->processId());
+        // Force-kill the worker to instantly stop laggy code.
+        // The 'finished' signal will automatically respawn it and trigger the pending preview.
+        if (!runInFlight && pythonWorker->state() == QProcess::Running) {
+            pythonWorker->kill();
         }
         previewPending = true;
         return;
     }
     previewInFlight = true;
     updatePreviewTabLabel(true);
+
+    // Frame-buffer mode is enabled for auto-preview only...
 
     // Frame-buffer mode is enabled for auto-preview only (not Run renders, which need to
     // produce render.mp4 for export and don't gain anything from the buffer).
@@ -1563,14 +1571,12 @@ int main(int argc, char *argv[]) {
         runQueued = true;
         previewPending = false;
         if (previewDebounceTimer) previewDebounceTimer->stop();
+
         if (previewInFlight) {
-            // Interrupt the in-flight auto-preview by sending SIGINT to the worker.
-            // The worker catches KeyboardInterrupt, prints DONE, and processes our Run next.
-            // Do NOT interrupt if it's actually a Run that's running (runInFlight).
-            if (!runInFlight && pythonWorker && pythonWorker->processId() > 0) {
-                sendInterruptToWorker(pythonWorker->processId());
+            // Force-kill the active preview worker.
+            if (!runInFlight && pythonWorker && pythonWorker->state() == QProcess::Running) {
+                pythonWorker->kill();
             }
-            // workerOnFinished fires when the (interrupted) preview prints DONE.
             workerOnFinished = [runHighQualityPreview](bool) { runHighQualityPreview(); };
         } else {
             runHighQualityPreview();
@@ -1694,11 +1700,11 @@ int main(int argc, char *argv[]) {
             copyOver();
         } else if (choice.clickedButton() == rerenderBtn) {
             auto startExportRender = [copyOver, outputDisplay, mediaHeader, mediaPanel, codePanel, &mediaPath]() {
-                // Force full quality (dx=dt=1.0) for export via override — settings.txt is untouched.
+                // Force full quality (dx=dt=1.0) for export via override
                 remakeNeoverePy(mediaPath, "1.0", "1.0");
 
                 workerOnFinished = [copyOver, outputDisplay, &mediaPath](bool success) {
-                    remakeNeoverePy(mediaPath);  // back to preview dx/dt from settings.txt
+                    remakeNeoverePy(mediaPath);
                     if (success) {
                         copyOver();
                     } else {
@@ -1710,12 +1716,10 @@ int main(int argc, char *argv[]) {
                 compileCode(code, outputDisplay, mediaHeader, mediaPanel);
             };
 
-            // If a preview is in flight, abort it (SIGINT) and wait for its DONE before
-            // starting the export. Otherwise the export's settings swap + workerOnFinished
-            // get consumed by the wrong DONE.
             if (previewInFlight) {
-                if (!runInFlight && pythonWorker && pythonWorker->processId() > 0) {
-                    sendInterruptToWorker(pythonWorker->processId());
+                // Force-kill the active preview worker.
+                if (!runInFlight && pythonWorker && pythonWorker->state() == QProcess::Running) {
+                    pythonWorker->kill();
                 }
                 workerOnFinished = [startExportRender](bool) { startExportRender(); };
             } else {

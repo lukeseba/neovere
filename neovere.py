@@ -27,7 +27,7 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4"]
+_paths = ["render.mp4", "C:/Users/luke/Downloads/1000044807.mp4"]
 arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 
 api_key = ""

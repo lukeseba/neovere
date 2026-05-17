@@ -1,5 +1,12 @@
+// VideoSlider.cpp
+//
+// Created by lukebalfanz on 11/7/24.
+//
+
 #include "VideoSlider.h"
+
 #include <iostream>
+#include <ostream>
 #include <QPainter>
 #include <QStyleOptionSlider>
 #include <QMouseEvent>
@@ -12,6 +19,7 @@ VideoSlider::VideoSlider(MediaFrame *panel, int size, QWidget *parent) : QSlider
     this->sliderUpdateTimer = new QTimer(this);
     this->vidUpdate = true;
     this->manualSliderUpdate = false;
+    this->wasPlayingBeforeInteraction = false;
 
     videoUpdateTimer->setInterval(100);
     sliderUpdateTimer->setInterval(250);
@@ -43,21 +51,62 @@ VideoSlider::VideoSlider(MediaFrame *panel, int size, QWidget *parent) : QSlider
             updateSlider(pos, mediaPanel->fbController()->durationMs());
         }
     });
+
+    setMouseTracking(true); // Enable hover detection
+}
+
+void VideoSlider::setColor(const QColor &filledColor, const QColor &backgroundBaseColor) {
+    this->filledColor = filledColor;
+    this->backgroundBaseColor = backgroundBaseColor;
+    update(); // Trigger repaint with new colors
+}
+
+void VideoSlider::paintEvent(QPaintEvent *event) {
+    Q_UNUSED(event);
+
+    QPainter painter(this);
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+
+    // Background: rounded rectangle with customizable color
+    QRect trackRect = rect().adjusted(5, 0, -5, 0);
+    painter.setRenderHint(QPainter::Antialiasing);
+    QColor background = underMouse() ? backgroundBaseColor.lighter(110) : backgroundBaseColor;
+    int playheadWidth = underMouse() ? 8 : 4;
+    painter.setBrush(background);
+    painter.setPen(Qt::NoPen);
+    painter.drawRoundedRect(trackRect, 2, 2);
+
+    // Filled area to the left of the playhead with customizable color
+    int fillWidth = 0;
+    if (maximum() > minimum()) {
+        fillWidth = (value() - minimum()) * trackRect.width() / (maximum() - minimum());
+    }
+    QRect filledRect = QRect(trackRect.left(), trackRect.top(), fillWidth, trackRect.height());
+    painter.setBrush(filledColor);
+    painter.drawRoundedRect(filledRect, 2, 2);
+
+    // Playhead: white line with a hint of blue
+    int playheadX = trackRect.left() + fillWidth;
+    QRect playheadRect(playheadX - 2 - playheadWidth/2, trackRect.top(), playheadWidth, trackRect.height());
+    painter.setPen(Qt::gray);
+    painter.setBrush(QColor(250, 250, 255));
+    painter.drawRect(playheadRect);
 }
 
 void VideoSlider::mousePressEvent(QMouseEvent *event) {
     if (event->button() == Qt::LeftButton) {
+        // Record current playback state and pause before moving the slider
         if (mediaPanel->currentMode() == MediaFrame::Mode::VideoFile) {
-            if (mediaPanel->getPlayer()->playbackState() == QMediaPlayer::PlayingState) {
-                mediaPanel->getPlayer()->pause();
-            }
+            wasPlayingBeforeInteraction = (mediaPanel->getPlayer()->playbackState() == QMediaPlayer::PlayingState);
+            if (wasPlayingBeforeInteraction) mediaPanel->getPlayer()->pause();
         } else {
-            if (mediaPanel->fbController()->isPlaying()) {
-                mediaPanel->fbController()->pause();
-            }
+            wasPlayingBeforeInteraction = mediaPanel->fbController()->isPlaying();
+            if (wasPlayingBeforeInteraction) mediaPanel->fbController()->pause();
         }
+
         manualSliderUpdate = true;
-        
+
         double pos = event->pos().x() / (double)width();
         setValue(pos * maximum());
         setVidPosition();
@@ -69,10 +118,14 @@ void VideoSlider::mouseReleaseEvent(QMouseEvent *event) {
     if (manualSliderUpdate) {
         manualSliderUpdate = false;
         setVidPosition();
-        if (mediaPanel->currentMode() == MediaFrame::Mode::VideoFile) {
-            mediaPanel->getPlayer()->play();
-        } else {
-            mediaPanel->fbController()->play();
+
+        // Only resume playback if it was playing BEFORE you clicked
+        if (wasPlayingBeforeInteraction) {
+            if (mediaPanel->currentMode() == MediaFrame::Mode::VideoFile) {
+                mediaPanel->getPlayer()->play();
+            } else {
+                mediaPanel->fbController()->play();
+            }
         }
         sliderUpdateTimer->stop();
     }
@@ -80,26 +133,29 @@ void VideoSlider::mouseReleaseEvent(QMouseEvent *event) {
 }
 
 void VideoSlider::enterEvent(QEnterEvent *event) {
-    update();
+    update(); // Trigger repaint to apply hover highlight
     QSlider::enterEvent(event);
 }
 
 void VideoSlider::leaveEvent(QEvent *event) {
-    update();
+    update(); // Trigger repaint to remove hover highlight
     QSlider::leaveEvent(event);
 }
 
 void VideoSlider::sliderChange(SliderChange change) {
     if (change == SliderValueChange && !vidUpdate && !sliderUpdateTimer->isActive()) {
-        if (mediaPanel->currentMode() == MediaFrame::Mode::VideoFile) {
-            if (mediaPanel->getPlayer()->playbackState() == QMediaPlayer::PlayingState) {
-                mediaPanel->getPlayer()->pause();
-            }
-        } else {
-            if (mediaPanel->fbController()->isPlaying()) {
-                mediaPanel->fbController()->pause();
+
+        // If dragged via keyboard or otherwise (not caught by mousePress)
+        if (!manualSliderUpdate) {
+            if (mediaPanel->currentMode() == MediaFrame::Mode::VideoFile) {
+                wasPlayingBeforeInteraction = (mediaPanel->getPlayer()->playbackState() == QMediaPlayer::PlayingState);
+                if (wasPlayingBeforeInteraction) mediaPanel->getPlayer()->pause();
+            } else {
+                wasPlayingBeforeInteraction = mediaPanel->fbController()->isPlaying();
+                if (wasPlayingBeforeInteraction) mediaPanel->fbController()->pause();
             }
         }
+
         manualSliderUpdate = true;
         setVidPosition();
         sliderUpdateTimer->start();
@@ -137,36 +193,6 @@ void VideoSlider::assignButton(QPushButton *btn) {
     this->button = btn;
 }
 
-QString VideoSlider::convertToTimestamp(int position) const {
-    int totalSeconds = position / 1000;
-    int minutes = totalSeconds / 60;
-    int seconds = totalSeconds % 60;
-    return QString("%1:%2").arg(minutes, 2, 10, QChar('0')).arg(seconds, 2, 10, QChar('0'));
-}
-
-void VideoSlider::setColor(const QColor &filled, const QColor &background) {
-    filledColor = filled;
-    backgroundBaseColor = background;
-    update();
-}
-
-void VideoSlider::paintEvent(QPaintEvent *event) {
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    
-    QRect r = rect();
-    int trackHeight = 4;
-    QRect trackRect(r.left(), r.center().y() - trackHeight/2, r.width(), trackHeight);
-    
-    p.setPen(Qt::NoPen);
-    p.setBrush(backgroundBaseColor);
-    p.drawRoundedRect(trackRect, 2, 2);
-    
-    int fillWidth = 0;
-    if (maximum() > 0) {
-        fillWidth = (value() * r.width()) / maximum();
-    }
-    QRect fillRect(trackRect.left(), trackRect.top(), fillWidth, trackHeight);
-    p.setBrush(filledColor);
-    p.drawRoundedRect(fillRect, 2, 2);
+QString VideoSlider::convertToTimestamp(int seconds) {
+    return QVariant(seconds/60000).toString()+":" + (seconds/1000%60<10 ? "0" : "") + QVariant(seconds/1000%60).toString();
 }
