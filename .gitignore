@@ -3,3 +3,9 @@
 *.aac
 settings.txt
 VideoCache/
+build-release/
+build-windows/
+dist/
+*.dmg
+*.exe
+.pbs-cache/

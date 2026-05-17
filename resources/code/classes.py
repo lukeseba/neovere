@@ -756,6 +756,13 @@ class Audio:
         Parameters:
             reload (bool): Whether to force reloading even if cached data exists.
         """
+        # AudioCache/ may not exist yet on first run in a fresh workspace
+        # (e.g. ~/Documents/Neovere/ created by the packaged .app on first launch).
+        # Without this, rnp.save() below fails with FileNotFoundError and the
+        # exception propagates to setVideo.py's bare `except`, which silently
+        # swallows it — leaving self._loaded == False so subsequent frame_audio
+        # calls raise "Audio data not preloaded".
+        os.makedirs("AudioCache", exist_ok=True)
         cache_file = f"AudioCache/{self._encode_cache_name(self._file_path)}.npy"
 
         if os.path.isfile(cache_file) and not reload:
@@ -803,6 +810,11 @@ class Audio:
                 "sample rate": self._sample_rate
             })
             rnp.save(cache_file, self._audio_data)
+            # Strip the metadata trailer back off so the in-memory layout matches
+            # the cache-hit branch above (which does full_audio_data[:-1]).
+            # Without this, frame_audio(N-1) returns the metadata dict and blows
+            # up with KeyError('frequencies').
+            self._audio_data = self._audio_data[:-1]
 
         self._loaded = True
 
@@ -1454,6 +1466,7 @@ class Bot:
         filename = generate_random_filename(seed=audio_counter)
         audio_counter += 1
 
+        os.makedirs("AudioCache", exist_ok=True)
         audio_path = f"AudioCache/{filename}.wav"
         speech_file_path = Path(audio_path)
 

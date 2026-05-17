@@ -27,7 +27,7 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4", "/Users/lukeseba/Downloads/final montage.mp4"]
+_paths = ["render.mp4"]
 arial = "/var/folders/r6/f9m8k8sd1b3840csp48x03bm0000gn/T/arial-bold.ttf"
 
 api_key = "" #[%$# #$%]

@@ -397,18 +397,72 @@ void remakeNeoverePy(QStringList &mediaPath, const QString& dxOverride = "", con
         outFile.close();
 }
 
+// Returns the path to the Python interpreter shipped inside the packaged
+// build (.app on macOS, install dir on Windows), or an empty string if this
+// is a dev build with no bundled python.
+//
+// Layouts:
+//   macOS:   Neovere.app/Contents/MacOS/Neovere       (applicationDirPath)
+//            Neovere.app/Contents/Resources/python/bin/python3
+//   Windows: <install>/Neovere.exe                    (applicationDirPath)
+//            <install>/python/python.exe
+QString resolveBundledPython() {
+    QString appDir = QCoreApplication::applicationDirPath();
+    // macOS: codesign refuses to seal arbitrary directory trees under
+    // Frameworks/, so the python tree lives under Resources/ instead.
+    QString macPath = QDir::cleanPath(appDir + "/../Resources/python/bin/python3");
+    if (QFile::exists(macPath)) return macPath;
+    // Windows: bundled python sits next to the .exe.
+    QString winPath = QDir::cleanPath(appDir + "/python/python.exe");
+    if (QFile::exists(winPath)) return winPath;
+    return QString();
+}
+
+// True iff we're running from a packaged build (.app / Windows install dir)
+// rather than a dev build invoked from a source checkout. Detected via the
+// presence of the bundled python tree.
+bool isPackagedBuild() {
+    return !resolveBundledPython().isEmpty();
+}
+
+// Returns the process environment used for every QProcess we spawn:
+// system env + the directory containing the main exe (which holds the bundled
+// ffmpeg/ffprobe) prepended to PATH. Without this, subprocesses launched from
+// a Finder-opened .app or Explorer-opened .exe can't find ffmpeg.
+QProcessEnvironment neovereProcessEnvironment() {
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    QString bundledBin = QCoreApplication::applicationDirPath();
+    QString existing = env.value("PATH");
+    // Path separator differs by platform: ':' on Unix, ';' on Windows.
+#ifdef Q_OS_WIN
+    const QChar sep = ';';
+#else
+    const QChar sep = ':';
+#endif
+    if (!existing.contains(bundledBin)) {
+        env.insert("PATH", bundledBin + sep + existing);
+    }
+    return env;
+}
+
 QString resolvePythonExecutable() {
-    QString pythonExecutable = "python3";
+    // 1) Explicit override in settings.txt wins
     QStringList settings = readFromFile("settings.txt").split("\n");
     if (settings.length() > 2 && !settings.at(2).trimmed().isEmpty()) {
-        pythonExecutable = settings.at(2).trimmed();
-    } else {
-        QString autoVenv = QDir::homePath() + "/neovere_venv/bin/python3";
-        if (QFile::exists(autoVenv)) {
-            pythonExecutable = autoVenv;
-        }
+        return settings.at(2).trimmed();
     }
-    return pythonExecutable;
+    // 2) User-level venv created on first launch
+#ifdef Q_OS_WIN
+    QString autoVenv = QDir::homePath() + "/neovere_venv/Scripts/python.exe";
+#else
+    QString autoVenv = QDir::homePath() + "/neovere_venv/bin/python3";
+#endif
+    if (QFile::exists(autoVenv)) return autoVenv;
+    // 3) Python bundled inside the .app (only present in packaged builds)
+    QString bundled = resolveBundledPython();
+    if (!bundled.isEmpty()) return bundled;
+    // 4) Last-resort PATH lookup (dev builds with system python3)
+    return QStringLiteral("python3");
 }
 
 void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, MediaFrame* mediaPanel) {
@@ -420,7 +474,7 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
     workerOutBuffer.clear();
 
     pythonWorker = new QProcess();
-    pythonWorker->setProcessEnvironment(QProcessEnvironment::systemEnvironment());
+    pythonWorker->setProcessEnvironment(neovereProcessEnvironment());
 
     QObject::connect(pythonWorker, &QProcess::readyReadStandardOutput, [outputDisplay, mediaHeader, mediaPanel]() {
         workerOutBuffer.append(pythonWorker->readAllStandardOutput());
@@ -1005,6 +1059,16 @@ void updateDocumentationTextBox(const QString &classCatagory,
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
+
+    // When running as a packaged build (Finder-opened .app, or a Windows
+    // install dir double-clicked from Explorer), CWD is "/" / "C:\Windows\System32"
+    // — neither writable nor sensible for the renderer's relative paths.
+    // Use ~/Documents/Neovere as the workspace. Dev builds leave CWD alone.
+    if (isPackagedBuild()) {
+        QString workspace = QDir::homePath() + "/Documents/Neovere";
+        QDir().mkpath(workspace);
+        QDir::setCurrent(workspace);
+    }
 
     // create font
     QFont dotrice = setFont(":/resources/fonts/dotrice.otf");
@@ -1763,16 +1827,41 @@ int main(int argc, char *argv[]) {
     // Set the layout for the window
     window.setLayout(mainLayout);
 
-    // Auto-create venv on first run if it doesn't exist
+    // Auto-create venv on first run if it doesn't exist.
+    // Prefer the Python interpreter bundled inside the packaged build,
+    // falling back to /usr/bin/python3 (macOS dev) or python3 from PATH (Windows dev).
+    //
+    // venv layouts differ between platforms:
+    //   POSIX:   ~/neovere_venv/bin/python3
+    //   Windows: ~/neovere_venv/Scripts/python.exe
+#ifdef Q_OS_WIN
+    QString venvPython = QDir::homePath() + "/neovere_venv/Scripts/python.exe";
+    QString venvPip    = QDir::homePath() + "/neovere_venv/Scripts/pip.exe";
+#else
     QString venvPython = QDir::homePath() + "/neovere_venv/bin/python3";
+    QString venvPip    = QDir::homePath() + "/neovere_venv/bin/pip";
+#endif
     if (!QFile::exists(venvPython)) {
         outputDisplay->appendPlainText("Setting up Python environment for the first time, please wait...");
 
+        QString bootstrapPython = resolveBundledPython();
+        if (bootstrapPython.isEmpty()) {
+#ifdef Q_OS_WIN
+            bootstrapPython = "python";   // PATH lookup on Windows dev builds
+#else
+            bootstrapPython = "/usr/bin/python3";
+#endif
+        }
+        outputDisplay->appendPlainText("Using interpreter: " + bootstrapPython);
+
         QProcess* setupProcess = new QProcess();
-        QString setupScript =
-            "/usr/bin/python3 -m venv ~/neovere_venv && "
-            "~/neovere_venv/bin/pip install --upgrade pip && "
-            "~/neovere_venv/bin/pip install pillow opencv-python scipy librosa soundfile openai pyqt5 numpy psutil";
+        setupProcess->setProcessEnvironment(neovereProcessEnvironment());
+        QString venvDir = QDir::homePath() + "/neovere_venv";
+        QString setupScript = QString(
+            "\"%1\" -m venv \"%2\" && "
+            "\"%3\" install --upgrade pip && "
+            "\"%3\" install pillow opencv-python scipy librosa soundfile openai pyqt5 numpy psutil"
+        ).arg(bootstrapPython, venvDir, venvPip);
 
         QObject::connect(setupProcess, &QProcess::readyReadStandardOutput, [setupProcess, outputDisplay]() {
             outputDisplay->appendPlainText(setupProcess->readAllStandardOutput().trimmed());
@@ -1784,12 +1873,26 @@ int main(int argc, char *argv[]) {
             [outputDisplay](int exitCode, QProcess::ExitStatus) {
                 if (exitCode == 0) {
                     outputDisplay->appendPlainText("Python environment ready.");
+                    // The persistent worker was started earlier with the bundled python
+                    // (since ~/neovere_venv/bin/python3 didn't exist yet). Now that the
+                    // venv is fully installed with all its packages (scipy, numpy, librosa,
+                    // ...), kill the worker — its existing auto-respawn handler will
+                    // restart it pointing at the venv interpreter.
+                    if (pythonWorker && pythonWorker->state() == QProcess::Running) {
+                        outputDisplay->appendPlainText("Reloading worker against the new venv...");
+                        pythonWorker->kill();
+                    }
                 } else {
                     outputDisplay->appendPlainText("Environment setup failed. You can set a Python interpreter manually in Settings.");
                 }
             });
 
+#ifdef Q_OS_WIN
+        // cmd.exe interprets /C "...full command line..." as one command.
+        setupProcess->start("cmd.exe", QStringList() << "/C" << setupScript);
+#else
         setupProcess->start("/bin/bash", QStringList() << "-lc" << setupScript);
+#endif
     }
 
     // Generate placeholder render.mp4 if it doesn't exist
@@ -1880,6 +1983,7 @@ else:
 
         outputDisplay->appendPlainText("Generating placeholder render.mp4 with: " + pythonExecutable);
         QProcess* placeholderProcess = new QProcess();
+        placeholderProcess->setProcessEnvironment(neovereProcessEnvironment());
         QObject::connect(placeholderProcess, &QProcess::readyReadStandardOutput, [placeholderProcess, outputDisplay]() {
             outputDisplay->appendPlainText("[placeholder] " + QString::fromUtf8(placeholderProcess->readAllStandardOutput()).trimmed());
         });
@@ -1906,6 +2010,7 @@ else:
     // reuse it via -c:a copy instead of regenerating audio per render.
     if (!QFile::exists("silent_audio.aac")) {
         QProcess silentAudioProc;
+        silentAudioProc.setProcessEnvironment(neovereProcessEnvironment());
         silentAudioProc.start("ffmpeg", QStringList()
             << "-y"
             << "-f" << "lavfi"

@@ -12,10 +12,7 @@ for f in range(video.frame_duration()):
 
 
 
-    # preview frame before adding to renderer
-    frame.preview()
     renderer.set_frame(f, frame)
 
 renderer.attach_audio(video.audio)
-# preview final render: True
-renderer.render(True)
+renderer.render(False)

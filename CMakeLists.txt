@@ -50,6 +50,18 @@ set(SOURCES main.cpp MaintainFrame.cpp MaintainFrame.h
 )
 qt_add_resources(SOURCES resources.qrc)
 
-add_executable(SimpleQtApp ${SOURCES})
+add_executable(SimpleQtApp MACOSX_BUNDLE ${SOURCES})
 
 target_link_libraries(SimpleQtApp PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets ${OpenCV_LIBS} ${Python3_LIBRARIES})
+
+if(APPLE)
+    set_target_properties(SimpleQtApp PROPERTIES
+        MACOSX_BUNDLE TRUE
+        OUTPUT_NAME "Neovere"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
+        MACOSX_BUNDLE_BUNDLE_NAME "Neovere"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.neovere.app"
+        MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+    )
+endif()
