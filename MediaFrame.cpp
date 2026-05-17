@@ -109,10 +109,20 @@ QMediaPlayer* MediaFrame::getPlayer() {
     return &mediaPlayer;
 }
 
+void MediaFrame::releaseFile() {
+    QUrl src = mediaPlayer.source();
+    if (!src.isEmpty()) stashedSource = src;
+    isPaused = true;
+    mediaPlayer.pause();
+    mediaPlayer.setSource(QUrl());
+}
+
 void MediaFrame::reloadVideo(qint64 seekToMs, bool resumePlaying) {
-    const QUrl source = mediaPlayer.source();
+    QUrl source = mediaPlayer.source();
+    if (source.isEmpty() && !stashedSource.isEmpty()) source = stashedSource;
     setVideo("");
-    mediaPlayer.setSource(source);
+    if (!source.isEmpty()) mediaPlayer.setSource(source);
+    stashedSource = QUrl();
     // Defer the seek + play kick to give Qt time to actually load the new source.
     // Calling setPosition() immediately after setSource() is silently dropped because
     // the file isn't ready yet. 150ms is plenty for a small preview.mp4 on Apple Silicon.
@@ -180,6 +190,11 @@ void MediaFrame::switchToVideoFile() {
     mode = Mode::VideoFile;
     if (controller) controller->pause();
     stack->setCurrentIndex(0);
+    // If the source was released for a Windows file-lock dance and never reloaded
+    // (e.g. auto-preview ended in FrameBuffer mode), restore it now.
+    if (mediaPlayer.source().isEmpty() && !stashedSource.isEmpty()) {
+        mediaPlayer.setSource(stashedSource);
+    }
 }
 
 void MediaFrame::switchToFrameBuffer() {
@@ -188,5 +203,14 @@ void MediaFrame::switchToFrameBuffer() {
     // Pause the existing QMediaPlayer so its audio doesn't keep playing under us
     isPaused = true;
     mediaPlayer.pause();
+#ifdef Q_OS_WIN
+    // Now that the frame buffer is the visible source, drop the QMediaPlayer's hold on
+    // preview.mp4 so the Python renderer can overwrite it (Phase 1 + Phase 2 of the
+    // preview render). The stash lets switchToVideoFile()/reloadVideo() restore the
+    // file path after the render completes.
+    QUrl src = mediaPlayer.source();
+    if (!src.isEmpty()) stashedSource = src;
+    mediaPlayer.setSource(QUrl());
+#endif
     stack->setCurrentIndex(1);
 }

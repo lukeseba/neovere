@@ -29,6 +29,10 @@ public:
     void playVideo();
     QMediaPlayer* getPlayer();
     void pauseVideo();
+    // Drops the QMediaPlayer's hold on the current source so an external writer (the
+    // Python renderer) can overwrite the file on Windows. The URL is stashed so
+    // reloadVideo()/switchToVideoFile() can restore it once the render finishes.
+    void releaseFile();
 
     // === New frame-buffer API ===
     void setFrameBuffer(FrameBufferReader* reader);   // doesn't take ownership
@@ -51,6 +55,7 @@ private:
     QVideoWidget videoWidget;
     QVBoxLayout *layout;
     bool isPaused;
+    QUrl stashedSource;             // last source URL before releaseFile() cleared it
     qint64 pendingSeekMs = -1;     // -1 = no pending seek
     bool pendingPlay = false;       // whether to start playing after the next LoadedMedia
     bool fbMirroring = false;       // guard for controller↔mediaPlayer position sync in FrameBuffer mode

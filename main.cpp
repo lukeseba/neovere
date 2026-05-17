@@ -4,6 +4,16 @@
 #include <functional>
 #include <signal.h>
 
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
+
 #include <QApplication>
 #include <QWidget>
 #include <QHBoxLayout>
@@ -83,8 +93,36 @@ bool runInFlight = false;                // worker is currently running a Run-bu
 bool runQueued = false;                  // user clicked Run; will dispatch once any current preview finishes
 QTimer* previewDebounceTimer = nullptr;
 static const char* WORKER_DONE_SENTINEL = "<<<NEO_DONE>>>";
+
+// Cross-platform interrupt: ask the Python worker to abort the current render with
+// KeyboardInterrupt so the next command (Run, latest preview, export) can take over.
+// POSIX uses SIGINT. Windows uses CTRL+BREAK delivered via the child's console group;
+// the worker is started with CREATE_NEW_PROCESS_GROUP, and WORKER_SCRIPT installs a
+// SIGBREAK handler that converts the event into KeyboardInterrupt.
+static void sendInterruptToWorker(qint64 pid) {
+    if (pid <= 0) return;
+#ifdef _WIN32
+    DWORD targetPid = static_cast<DWORD>(pid);
+    if (AttachConsole(targetPid)) {
+        SetConsoleCtrlHandler(nullptr, TRUE);
+        GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
+        FreeConsole();
+        SetConsoleCtrlHandler(nullptr, FALSE);
+    }
+#else
+    ::kill(static_cast<pid_t>(pid), SIGINT);
+#endif
+}
+
 static const char* WORKER_SCRIPT = R"PYTHON(
-import sys, importlib, os
+import sys, importlib, os, signal
+# On Windows, CTRL+BREAK's default handler terminates the process. Convert it to
+# KeyboardInterrupt so the worker can abort the current render and continue serving.
+if hasattr(signal, 'SIGBREAK'):
+    try:
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
+    except (ValueError, OSError):
+        pass
 END = "<<<NEO_DONE>>>"
 last_mtime = None
 while True:
@@ -461,8 +499,12 @@ QString resolvePythonExecutable() {
     // 3) Python bundled inside the .app (only present in packaged builds)
     QString bundled = resolveBundledPython();
     if (!bundled.isEmpty()) return bundled;
-    // 4) Last-resort PATH lookup (dev builds with system python3)
+    // 4) Last-resort PATH lookup (dev builds with system python)
+#ifdef Q_OS_WIN
+    return QStringLiteral("python");
+#else
     return QStringLiteral("python3");
+#endif
 }
 
 void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, MediaFrame* mediaPanel) {
@@ -475,6 +517,14 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
 
     pythonWorker = new QProcess();
     pythonWorker->setProcessEnvironment(neovereProcessEnvironment());
+#ifdef _WIN32
+    // Put the worker in its own process group so we can target it with
+    // GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, ...) without affecting the GUI.
+    pythonWorker->setCreateProcessArgumentsModifier(
+        [](QProcess::CreateProcessArguments* args) {
+            args->flags |= CREATE_NEW_PROCESS_GROUP;
+        });
+#endif
 
     QObject::connect(pythonWorker, &QProcess::readyReadStandardOutput, [outputDisplay, mediaHeader, mediaPanel]() {
         workerOutBuffer.append(pythonWorker->readAllStandardOutput());
@@ -493,18 +543,28 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                 // Auto-preview wrote frames into shared memory. Switch the preview tab
                 // to FrameBuffer mode and refresh.
                 if (!g_frameBuffer) {
-                    g_frameBuffer = new FrameBufferReader("/tmp/neovere_frames.bin");
+                    // Must match neovere.py's __fb_path: platform temp dir + filename.
+                    g_frameBuffer = new FrameBufferReader(QDir::tempPath() + "/neovere_frames.bin");
                 }
                 if (!g_frameBuffer->isOpen()) {
                     g_frameBuffer->open();
                 }
-                if (g_frameBuffer->isOpen()) {
-                    g_frameBuffer->refreshHeader();
-                    mediaPanel->setFrameBuffer(g_frameBuffer);
-                    if (QFile::exists("cached_preview_audio.aac")) {
-                        mediaPanel->setFrameBufferAudio(QFileInfo("cached_preview_audio.aac").absoluteFilePath());
-                    }
-                    if (mediaPanel->fbController()) mediaPanel->fbController()->refresh();
+                // Global flag so we don't asynchronously crash the position on every keystroke
+                    static bool fbAudioSet = false;
+
+                    if (g_frameBuffer->isOpen()) {
+                        g_frameBuffer->refreshHeader();
+                        mediaPanel->setFrameBuffer(g_frameBuffer);
+
+                        // Let <<<NEO_AUDIO_READY>>> handle the active reload.
+                        // Only seed this on the very first playback to prevent early resets.
+                        if (!fbAudioSet && QFile::exists("cached_preview_audio.aac")) {
+                            mediaPanel->setFrameBufferAudio(QFileInfo("cached_preview_audio.aac").absoluteFilePath());
+                            fbAudioSet = true;
+                        }
+                        if (mediaPanel->fbController()) {
+                            mediaPanel->fbController()->refresh();
+                        }
                     mediaPanel->switchToFrameBuffer();
                 }
             } else if (line == "<<<NEO_AUDIO_READY>>>") {
@@ -517,7 +577,15 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                 // First-pass preview.mp4 reload (legacy path). Skip when the panel is
                 // already in FrameBuffer mode — the buffer is the live source there and
                 // reloading the video file would steal control + pause the controller.
-                if (previewInFlight && mediaPanel->currentMode() != MediaFrame::Mode::FrameBuffer) {
+                // Also skip on Windows: reloading mid-render would re-lock preview.mp4
+                // and Phase 2 (audio attach) couldn't overwrite it. NEO_DONE handles
+                // the final reload.
+#ifdef Q_OS_WIN
+                const bool canReloadPhase1 = false;
+#else
+                const bool canReloadPhase1 = previewInFlight && mediaPanel->currentMode() != MediaFrame::Mode::FrameBuffer;
+#endif
+                if (canReloadPhase1) {
                     TabButton* sel = mediaHeader->selectedTab();
                     if (sel && sel->getData() == "preview.mp4") {
                         qint64 savedPos = mediaPanel->getPlayer()->position();
@@ -652,7 +720,7 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
         // Abort the in-flight auto-preview so we can render the latest code sooner.
         // Don't interrupt a Run — those are user-initiated and shouldn't be discarded.
         if (!runInFlight && pythonWorker->processId() > 0) {
-            ::kill(static_cast<pid_t>(pythonWorker->processId()), SIGINT);
+            sendInterruptToWorker(pythonWorker->processId());
         }
         previewPending = true;
         return;
@@ -670,6 +738,14 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
         "_neovere_mod.renderer.set_show_previews(" + QString(runInFlight ? "True" : "False") + ")\n"
         "_neovere_mod.renderer.set_use_frame_buffer(" + useFrameBuffer + ")\n"
         + code;
+#ifdef Q_OS_WIN
+    // Run renders write preview.mp4 directly (no frame buffer), so the file MUST be
+    // released before Python starts — the user will see the player blank during render
+    // (acceptable for an explicit Run). Auto-preview's release is deferred until
+    // switchToFrameBuffer() so the QMediaPlayer keeps showing the old preview seamlessly
+    // until the live frame buffer takes over.
+    if (runInFlight && mediaPanel) mediaPanel->releaseFile();
+#endif
     QByteArray scriptBytes = wrapped.toUtf8();
     QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
     pythonWorker->write(header);
@@ -1111,7 +1187,7 @@ int main(int argc, char *argv[]) {
     if (settings.length() > 0) {
         openaiKey = settings.at(0);
     }
-    
+
 
 
     // Main window widget
@@ -1258,7 +1334,7 @@ int main(int argc, char *argv[]) {
 
     // create video slider
     const int sliderSize = 1000;
-    VideoSlider *videoSlider = new VideoSlider(player, sliderSize);
+    VideoSlider *videoSlider = new VideoSlider(mediaPanel, sliderSize);
     videoSlider->setColor(nvMid);
 
     // create timestamp
@@ -1492,7 +1568,7 @@ int main(int argc, char *argv[]) {
             // The worker catches KeyboardInterrupt, prints DONE, and processes our Run next.
             // Do NOT interrupt if it's actually a Run that's running (runInFlight).
             if (!runInFlight && pythonWorker && pythonWorker->processId() > 0) {
-                ::kill(static_cast<pid_t>(pythonWorker->processId()), SIGINT);
+                sendInterruptToWorker(pythonWorker->processId());
             }
             // workerOnFinished fires when the (interrupted) preview prints DONE.
             workerOnFinished = [runHighQualityPreview](bool) { runHighQualityPreview(); };
@@ -1639,7 +1715,7 @@ int main(int argc, char *argv[]) {
             // get consumed by the wrong DONE.
             if (previewInFlight) {
                 if (!runInFlight && pythonWorker && pythonWorker->processId() > 0) {
-                    ::kill(static_cast<pid_t>(pythonWorker->processId()), SIGINT);
+                    sendInterruptToWorker(pythonWorker->processId());
                 }
                 workerOnFinished = [startExportRender](bool) { startExportRender(); };
             } else {
@@ -1857,11 +1933,13 @@ int main(int argc, char *argv[]) {
         QProcess* setupProcess = new QProcess();
         setupProcess->setProcessEnvironment(neovereProcessEnvironment());
         QString venvDir = QDir::homePath() + "/neovere_venv";
+#ifndef Q_OS_WIN
         QString setupScript = QString(
             "\"%1\" -m venv \"%2\" && "
             "\"%3\" install --upgrade pip && "
             "\"%3\" install pillow opencv-python scipy librosa soundfile openai pyqt5 numpy psutil"
         ).arg(bootstrapPython, venvDir, venvPip);
+#endif
 
         QObject::connect(setupProcess, &QProcess::readyReadStandardOutput, [setupProcess, outputDisplay]() {
             outputDisplay->appendPlainText(setupProcess->readAllStandardOutput().trimmed());
@@ -1888,8 +1966,32 @@ int main(int argc, char *argv[]) {
             });
 
 #ifdef Q_OS_WIN
-        // cmd.exe interprets /C "...full command line..." as one command.
-        setupProcess->start("cmd.exe", QStringList() << "/C" << setupScript);
+        // Qt's command-line construction escapes embedded quotes as `\"`, which cmd.exe
+        // doesn't interpret — so running the script directly through `cmd.exe /C "..."`
+        // ends up with cmd trying to execute `\"python\"` as a literal command. Sidestep
+        // the whole quoting problem by writing the script to a temp .bat that cmd reads
+        // from disk (where cmd-native `"..."` quoting works normally).
+        QString batPath = QDir::tempPath() + "/neovere_venv_setup.bat";
+        {
+            QFile bat(batPath);
+            if (bat.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                // Use `python.exe -m pip` rather than pip.exe — on Windows, pip can't
+                // upgrade itself via pip.exe (the running pip.exe is locked and can't be
+                // overwritten). pip itself prints this guidance when it detects the case.
+                QByteArray script;
+                script += "@echo on\r\n";
+                script += "\"" + bootstrapPython.toUtf8() + "\" -m venv \""
+                          + venvDir.toUtf8() + "\"\r\n";
+                script += "if errorlevel 1 exit /b 1\r\n";
+                script += "\"" + venvPython.toUtf8() + "\" -m pip install --upgrade pip\r\n";
+                script += "if errorlevel 1 exit /b 1\r\n";
+                script += "\"" + venvPython.toUtf8() + "\" -m pip install pillow opencv-python "
+                          "scipy librosa soundfile openai pyqt5 numpy psutil\r\n";
+                bat.write(script);
+                bat.close();
+            }
+        }
+        setupProcess->start("cmd.exe", QStringList() << "/C" << batPath);
 #else
         setupProcess->start("/bin/bash", QStringList() << "-lc" << setupScript);
 #endif
@@ -1897,7 +1999,11 @@ int main(int argc, char *argv[]) {
 
     // Generate placeholder render.mp4 if it doesn't exist
     if (!QFile::exists("render.mp4")) {
+#ifdef Q_OS_WIN
+        QString pythonExecutable = "python";
+#else
         QString pythonExecutable = "python3";
+#endif
         QStringList startupSettings = readFromFile("settings.txt").split("\n");
         if (startupSettings.length() > 2 && !startupSettings.at(2).trimmed().isEmpty()) {
             pythonExecutable = startupSettings.at(2).trimmed();
@@ -2030,5 +2136,3 @@ else:
 
     return app.exec();
 }
-
-

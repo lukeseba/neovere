@@ -48,7 +48,7 @@ set(SOURCES main.cpp MaintainFrame.cpp MaintainFrame.h
         PlaybackController.cpp
         PlaybackController.h
 )
-qt_add_resources(SOURCES resources.qrc)
+qt_add_resources(SOURCES resources.qrc OPTIONS --no-zstd)
 
 add_executable(SimpleQtApp MACOSX_BUNDLE ${SOURCES})
 

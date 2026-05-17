@@ -294,6 +294,16 @@ class Video:
             os.makedirs(cache_dir, exist_ok=True)
             safe_name = "".join(c if c.isalnum() else f"_{ord(c)}_" for c in video_path)
             cache_path = f"{cache_dir}/{safe_name}_dx{dx}.mp4"
+
+            # Verify cache dimensions. If the source file changed, delete the stale cache.
+            if os.path.isfile(cache_path):
+                probe_cache = cv2.VideoCapture(cache_path)
+                cw = int(probe_cache.get(cv2.CAP_PROP_FRAME_WIDTH))
+                ch = int(probe_cache.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                probe_cache.release()
+                if cw != self.__width or ch != self.__height:
+                    os.remove(cache_path)
+
             if not os.path.isfile(cache_path):
                 print(f"[preview] Downscaling {video_path} -> {self.__width}x{self.__height} (one-time, cached)...")
                 # Try Apple's hardware H.264 encoder first; fall back to libx264 on any other platform.
@@ -401,7 +411,8 @@ class Video:
             ret, frame = self.__video.read()
             last_read += 1
             if ret:
-                if dx != 1.0 and not self.__pre_scaled:
+                # Always ensure the loaded frame strictly matches the expected dimensions
+                if frame.shape[1] != self.__width or frame.shape[0] != self.__height:
                     frame = cv2.resize(frame, (self.__width, self.__height))
                 if fmt == "jpeg":
                     ok, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -490,8 +501,8 @@ class Video:
         if ret:
             if gpu_enabled:
                 frame = np.asarray(frame)
-            # Apply preview scale only if source isn't pre-scaled by ffmpeg
-            if dx != 1.0 and not self.__pre_scaled:
+            # Always ensure the loaded frame strictly matches the expected dimensions
+            if frame.shape[1] != self.__width or frame.shape[0] != self.__height:
                 frame = cv2.resize(frame, (self.__width, self.__height))
             if h is None and w != 1.0:
                 frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
@@ -575,7 +586,6 @@ class Video:
             else:
                 source_idx = index
             return self.audio.frame_audio(source_idx)
-
 
 class Audio:
     def __init__(self, file_path: str) -> None:
@@ -922,8 +932,11 @@ class NonlinearRenderer:
         self.__preview_mode = False
         self.__show_previews = False
         # Shared-memory frame buffer state — only used when the wrapper enables it.
+        # The path must match what the C++ side opens in FrameBufferReader; we use the
+        # platform's temp dir (Windows: %TEMP%, POSIX: /tmp) so the two sides agree.
+        import tempfile as _tempfile
         self.__use_frame_buffer = False
-        self.__fb_path = "/tmp/neovere_frames.bin"
+        self.__fb_path = os.path.join(_tempfile.gettempdir(), "neovere_frames.bin")
         self.__fb_mm = None              # numpy memmap of frame data (post-header)
         self.__fb_max_frames = 0         # capacity of allocated buffer
         self.__fb_generation = 0
@@ -1255,7 +1268,18 @@ class NonlinearRenderer:
             # This means the user hears the previous render's audio immediately on the
             # visual update (overwritten with the new audio in phase 2 below).
             if os.path.exists("preview.mp4"):
-                os.remove("preview.mp4")
+                # Windows: the C++ side releases preview.mp4 inside switchToFrameBuffer()
+                # right after we print NEO_FRAMES_READY, but that hop runs through Qt's
+                # event loop in another process so there's a small race window. Retry on
+                # PermissionError for up to ~600ms while QMediaPlayer drops its handle.
+                for _attempt in range(30):
+                    try:
+                        os.remove("preview.mp4")
+                        break
+                    except PermissionError:
+                        _time.sleep(0.02)
+                else:
+                    os.remove("preview.mp4")  # final attempt; re-raise if still locked
             audio_for_phase1 = "cached_preview_audio.aac" if os.path.exists("cached_preview_audio.aac") else "silent_audio.aac"
             if os.path.exists(audio_for_phase1):
                 result = subprocess.run([

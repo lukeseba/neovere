@@ -6,15 +6,16 @@
 #include <QSlider>
 #include <QTimer>
 #include <QColor>
+#include "MediaFrame.h"
 
 class VideoSlider: public QSlider {
     Q_OBJECT
 public:
-    explicit VideoSlider(QMediaPlayer *player, int sliderSize, QWidget *parent = nullptr);
+    explicit VideoSlider(MediaFrame *mediaPanel, int sliderSize, QWidget *parent = nullptr);
     void assignButton(QPushButton *button);
     void updateTimeStamp(int position, int duration) const;
     void updateTimeStamp();
-    void setColor(const QColor &filledColor, const QColor &backgroundBaseColor = QColor(120, 130, 150)); // Add this line
+    void setColor(const QColor &filledColor, const QColor &backgroundBaseColor = QColor(120, 130, 150));
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
@@ -26,16 +27,16 @@ protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
-    QMediaPlayer *player;
+    MediaFrame *mediaPanel;
     int sliderSize;
     QTimer* sliderUpdateTimer;
     QTimer* videoUpdateTimer;
     bool vidUpdate;
     bool manualSliderUpdate;
     QPushButton *button{};
-    QColor filledColor = QColor(185, 205, 230);  // Default filled color (pastel blue)
-    QColor backgroundBaseColor = QColor(120, 130, 150);  // Default background base color
-
-    static QString convertToTimestamp(int seconds);
+    QColor filledColor = QColor(185, 205, 230);
+    QColor backgroundBaseColor = QColor(120, 130, 150);
+    QString convertToTimestamp(int position) const;
 };
-#endif //VIDEOSLIDER_H
+
+#endif // VIDEOSLIDER_H
