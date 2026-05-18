@@ -706,12 +706,15 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
 
     outputDisplay->appendPlainText("Compiling video ...");
 
+    // Use .format() to avoid illegal backslash escapes inside f-strings
     QString wrapped =
         "print('<<<NEO_BEGIN_RUN>>>', flush=True)\n"
         "import neovere as _neovere_mod\n"
+        "print('[info] Engine Compute: {}'.format('GPU Accelerated (CuPy)' if _neovere_mod.np.__name__ == 'cupy' else 'CPU Default (NumPy)'), flush=True)\n"
         "_neovere_mod.renderer.set_preview_mode(False)\n"
         "_neovere_mod.renderer.set_show_previews(True)\n"
         + code;
+
     QByteArray scriptBytes = wrapped.toUtf8();
     QByteArray header = QString("LEN:%1\n").arg(scriptBytes.size()).toUtf8();
     pythonWorker->write(header);
@@ -723,8 +726,6 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
         return;
     }
     if (previewInFlight) {
-        // Force-kill the worker to instantly stop laggy code.
-        // The 'finished' signal will automatically respawn it and trigger the pending preview.
         if (!runInFlight && pythonWorker->state() == QProcess::Running) {
             pythonWorker->kill();
         }
@@ -734,24 +735,21 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
     previewInFlight = true;
     updatePreviewTabLabel(true);
 
-    // Frame-buffer mode is enabled for auto-preview only...
-
-    // Frame-buffer mode is enabled for auto-preview only (not Run renders, which need to
-    // produce render.mp4 for export and don't gain anything from the buffer).
     QString useFrameBuffer = runInFlight ? "False" : "True";
+
+    // Use .format() to avoid illegal backslash escapes inside f-strings
+    QString computeLog = runInFlight ? "print('[info] Engine Compute: {}'.format('GPU Accelerated (CuPy)' if _neovere_mod.np.__name__ == 'cupy' else 'CPU Default (NumPy)'), flush=True)\n" : "";
+
     QString wrapped =
         "print('<<<NEO_BEGIN_PREVIEW>>>', flush=True)\n"
         "import neovere as _neovere_mod\n"
+        + computeLog +
         "_neovere_mod.renderer.set_preview_mode(True)\n"
         "_neovere_mod.renderer.set_show_previews(" + QString(runInFlight ? "True" : "False") + ")\n"
         "_neovere_mod.renderer.set_use_frame_buffer(" + useFrameBuffer + ")\n"
         + code;
+
 #ifdef Q_OS_WIN
-    // Run renders write preview.mp4 directly (no frame buffer), so the file MUST be
-    // released before Python starts — the user will see the player blank during render
-    // (acceptable for an explicit Run). Auto-preview's release is deferred until
-    // switchToFrameBuffer() so the QMediaPlayer keeps showing the old preview seamlessly
-    // until the live frame buffer takes over.
     if (runInFlight && mediaPanel) mediaPanel->releaseFile();
 #endif
     QByteArray scriptBytes = wrapped.toUtf8();
@@ -1566,18 +1564,27 @@ int main(int argc, char *argv[]) {
         dispatchPreview(code, outputDisplay, mediaHeader, mediaPanel);
     };
 
-    QObject::connect(runButton, &QPushButton::clicked, [runHighQualityPreview]() {
-        if (runQueued || runInFlight) return;  // already queued or running
-        runQueued = true;
+    QObject::connect(runButton, &QPushButton::clicked, [runHighQualityPreview, outputDisplay]() {
+        if (runQueued) return;  // Prevent spamming the button while waiting for a kill
+
         previewPending = false;
         if (previewDebounceTimer) previewDebounceTimer->stop();
 
-        if (previewInFlight) {
-            // Force-kill the active preview worker.
-            if (!runInFlight && pythonWorker && pythonWorker->state() == QProcess::Running) {
+        if (runInFlight || previewInFlight) {
+            outputDisplay->appendPlainText("Aborting current render to start a new one...");
+            runQueued = true;
+
+            // Queue the new render to happen exactly when the worker finishes dying and respawns
+            workerOnFinished = [runHighQualityPreview](bool) {
+                runInFlight = false; // Reset the flag from the aborted run
+                runHighQualityPreview();
+            };
+
+            // Force-kill the active worker. The 'finished' signal will catch this,
+            // respawn the Python engine, and trigger the workerOnFinished lambda above.
+            if (pythonWorker && pythonWorker->state() == QProcess::Running) {
                 pythonWorker->kill();
             }
-            workerOnFinished = [runHighQualityPreview](bool) { runHighQualityPreview(); };
         } else {
             runHighQualityPreview();
         }
@@ -1601,7 +1608,7 @@ int main(int argc, char *argv[]) {
 
     // Make the import button import a media file
     QObject::connect(uploadButton, &QPushButton::clicked, [&window, &mediaPath, outputDisplay, mediaPanel, mediaHeader]() {
-        QString fileName = QFileDialog::getOpenFileName(&window, "Open File", "", "Media Files (*.mp4 *.mp3);;All Files (*)");
+        QString fileName = QFileDialog::getOpenFileName(&window, "Open File", "", "Media Files (*.mp4 *.mp3 *.jpg *.jpeg *.png);;All Files (*)");
         if (!fileName.isEmpty()) {
             importMedia(fileName, mediaPath, outputDisplay, mediaHeader);
         }
@@ -1990,7 +1997,7 @@ int main(int argc, char *argv[]) {
                 script += "\"" + venvPython.toUtf8() + "\" -m pip install --upgrade pip\r\n";
                 script += "if errorlevel 1 exit /b 1\r\n";
                 script += "\"" + venvPython.toUtf8() + "\" -m pip install pillow opencv-python "
-                          "scipy librosa soundfile openai pyqt5 numpy psutil\r\n";
+                          "scipy librosa soundfile openai pyqt5 numpy psutil cupy-cuda12x\r\n";
                 bat.write(script);
                 bat.close();
             }

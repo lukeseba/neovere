@@ -44,13 +44,6 @@
 
     apply(pixels: np.ndarray) -> np.ndarray:
 #    Apply the solid color filter to pixel data using the field mask.
-#
-#    Parameters:
-#        pixels (np.ndarray): The pixel data to apply the color filter to.
-#
-#    Returns:
-#        np.ndarray: The color-modified pixel data.
-#
 
 * class Invert(Filter):
 #    A filter that inverts the colors of a Field-based mask.

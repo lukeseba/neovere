@@ -895,6 +895,74 @@ class Audio:
         return self._file_path
 
 
+class ImageFile:
+    """A class to represent and manipulate static images as media assets."""
+
+    def __init__(self, file_path: str) -> None:
+        self.__file_path = file_path
+
+        # Load with unchanged to preserve alpha channel if it exists
+        raw_image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+        if raw_image is None:
+            raise ValueError(f"Could not load image file: {file_path}")
+
+        # If the image has an alpha channel (4 channels), blend it over a black background
+        # so it safely converts to the standard 3-channel BGR format the engine expects
+        if raw_image.shape[2] == 4:
+            alpha = raw_image[:, :, 3] / 255.0
+            bgr = raw_image[:, :, :3]
+
+            # Use standard numpy to avoid GPU setup lag during initialization
+            bg = rnp.zeros_like(bgr, dtype=rnp.float32)
+
+            for c in range(3):
+                bg[:, :, c] = (alpha * bgr[:, :, c])
+            self.__image = bg.astype(rnp.uint8)
+        else:
+            self.__image = raw_image
+
+        self.__height, self.__width = self.__image.shape[:2]
+
+    def get_frame(self, frame_index: int = 0, w=1.0, h=None) -> Frame:
+        """Returns the image as a Frame. The frame_index is ignored since it's static."""
+        with _profile("image.get_frame"):
+            frame = self.__image.copy()
+
+            if gpu_enabled:
+                frame = np.asarray(frame)
+
+            if h is None and w != 1.0:
+                if gpu_enabled:
+                    frame_cpu = np.asnumpy(frame).astype(np.uint8)
+                    frame_cpu = cv2.resize(frame_cpu, (0, 0), fx=w, fy=w)
+                    frame = np.asarray(frame_cpu)
+                else:
+                    frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
+            elif h is not None:
+                if gpu_enabled:
+                    frame_cpu = np.asnumpy(frame).astype(np.uint8)
+                    frame_cpu = cv2.resize(frame_cpu, (w, h))
+                    frame = np.asarray(frame_cpu)
+                else:
+                    frame = cv2.resize(frame, (w, h))
+
+            return Frame(frame)
+
+    def frame_duration(self) -> int:
+        return 999999
+
+    def fps(self) -> float:
+        return renderer.fps()
+
+    def width(self) -> int:
+        return self.__width
+
+    def height(self) -> int:
+        return self.__height
+
+    def file_path(self) -> str:
+        return self.__file_path
+
 import cv2
 import subprocess
 import os

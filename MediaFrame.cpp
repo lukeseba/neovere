@@ -1,7 +1,3 @@
-//
-// Created by lukebalfanz on 11/6/24.
-//
-
 #include "MediaFrame.h"
 
 #include <iostream>
@@ -15,11 +11,12 @@
 #include <QFileInfo>
 #include <QDateTime>
 #include <QTimer>
+#include <QPixmap>
 
 MediaFrame::MediaFrame(QWidget *parent)
     : MaintainFrame(16, 9, parent),
-mediaPlayer(new QMediaPlayer(this)),
-videoWidget(new QVideoWidget(this)) {
+mediaPlayer(this),
+videoWidget(this) {
 
     this->isPaused = false;
 
@@ -30,16 +27,20 @@ videoWidget(new QVideoWidget(this)) {
     stack->addWidget(&videoWidget);          // index 0: VideoFile mode
     fbWidget = new PreviewWidget(this);
     stack->addWidget(fbWidget);              // index 1: FrameBuffer mode
+
+    // Add image widget
+    imageWidget = new QLabel(this);
+    imageWidget->setAlignment(Qt::AlignCenter);
+    imageWidget->setScaledContents(true);
+    imageWidget->setStyleSheet("background-color: black;");
+    stack->addWidget(imageWidget);           // index 2: ImageFile mode
+
     stack->setCurrentIndex(0);
     layout->addWidget(stack);
 
     controller = new PlaybackController(this);
     controller->setPreviewWidget(fbWidget);
 
-    // While in FrameBuffer mode, mirror the controller's position into the (paused)
-    // QMediaPlayer so the existing VideoSlider — which is wired to mediaPlayer — keeps
-    // showing the right timeline position. fbMirroring guards against the reverse
-    // direction triggering a feedback loop.
     QObject::connect(controller, &PlaybackController::positionChanged, this, [this](qint64 ms) {
         if (mode != Mode::FrameBuffer) return;
         if (fbMirroring) return;
@@ -49,9 +50,6 @@ videoWidget(new QVideoWidget(this)) {
         fbMirroring = false;
     });
 
-    // When the user scrubs the slider, it calls mediaPlayer.setPosition() which fires
-    // positionChanged on the player. In FrameBuffer mode, route that back into the
-    // controller so the displayed frame seeks too.
     QObject::connect(&mediaPlayer, &QMediaPlayer::positionChanged, this, [this](qint64 ms) {
         if (mode != Mode::FrameBuffer) return;
         if (fbMirroring) return;
@@ -62,13 +60,11 @@ videoWidget(new QVideoWidget(this)) {
         }
     });
 
-    // configure media player to the video widget
     QAudioOutput *audioOut = new QAudioOutput();
     audioOut->setVolume(50);
     mediaPlayer.setVideoOutput(&videoWidget);
     mediaPlayer.setAudioOutput(audioOut);
 
-    // get media resolution when media is changed
     QObject::connect(&mediaPlayer, &QMediaPlayer::mediaStatusChanged, [&](QMediaPlayer::MediaStatus status) {
         if (status == QMediaPlayer::LoadedMedia) {
             QSize resolution = mediaPlayer.metaData().value(QMediaMetaData::Resolution).toSize();
@@ -90,14 +86,12 @@ videoWidget(new QVideoWidget(this)) {
         qDebug() << "Media player error" << error << ":" << errorString << "| source:" << mediaPlayer.source();
     });
 
-    // ensure video stays isPaused if unisPaused by anything else
     QObject::connect(&mediaPlayer, &QMediaPlayer::playbackStateChanged, [&](QMediaPlayer::PlaybackState state) {
         if (state == QMediaPlayer::PlayingState && isPaused) {
             mediaPlayer.pause();
         }
     });
 
-    // set layout for the media frame
     this->setLayout(layout);
 }
 
@@ -118,22 +112,19 @@ void MediaFrame::releaseFile() {
 }
 
 void MediaFrame::reloadVideo(qint64 seekToMs, bool resumePlaying) {
+    if (mode == Mode::ImageFile) return; // Static images don't need reloading from renders
+
     QUrl source = mediaPlayer.source();
     if (source.isEmpty() && !stashedSource.isEmpty()) source = stashedSource;
     setVideo("");
     if (!source.isEmpty()) mediaPlayer.setSource(source);
     stashedSource = QUrl();
-    // Defer the seek + play kick to give Qt time to actually load the new source.
-    // Calling setPosition() immediately after setSource() is silently dropped because
-    // the file isn't ready yet. 150ms is plenty for a small preview.mp4 on Apple Silicon.
+
     QTimer::singleShot(150, this, [this, seekToMs, resumePlaying]() {
         mediaPlayer.setPosition(seekToMs);
         if (resumePlaying) {
             playVideo();
         } else {
-            // Briefly play to force the decoder to present the seeked frame.
-            // The playbackStateChanged handler in the constructor auto-pauses
-            // because isPaused stays true.
             isPaused = true;
             mediaPlayer.play();
         }
@@ -143,13 +134,33 @@ void MediaFrame::reloadVideo(qint64 seekToMs, bool resumePlaying) {
 void MediaFrame::setVideo(const QString &filePath) {
     if (filePath.isEmpty()) {
         mediaPlayer.setSource(QUrl());
+        imageWidget->clear();
     } else {
-        mediaPlayer.setSource(QUrl::fromLocalFile(QFileInfo(filePath).absoluteFilePath()));
-        mediaPlayer.setPosition(0);
-        pauseVideo();
+        QString lowerPath = filePath.toLower();
+
+        // Intercept images before giving them to the video player
+        if (lowerPath.endsWith(".png") || lowerPath.endsWith(".jpg") || lowerPath.endsWith(".jpeg")) {
+            switchToImageFile();
+            QPixmap pixmap(filePath);
+            if (!pixmap.isNull()) {
+                imageWidget->setPixmap(pixmap);
+                aspectWidth = pixmap.width();
+                aspectHeight = pixmap.height();
+
+                // Kick layout reflow to snap aspect ratio
+                resize(width()+1, height());
+                resize(width()-1, height());
+            }
+        } else {
+            switchToVideoFile();
+            mediaPlayer.setSource(QUrl::fromLocalFile(QFileInfo(filePath).absoluteFilePath()));
+            mediaPlayer.setPosition(0);
+            pauseVideo();
+        }
     }
 }
 void MediaFrame::playVideo() {
+    if (mode == Mode::ImageFile) return;
     if (mode == Mode::FrameBuffer && controller) {
         controller->play();
         emit pauseStateChanged(false);
@@ -161,6 +172,7 @@ void MediaFrame::playVideo() {
 }
 
 void MediaFrame::pauseVideo() {
+    if (mode == Mode::ImageFile) return;
     if (mode == Mode::FrameBuffer && controller) {
         controller->pause();
         emit pauseStateChanged(true);
@@ -170,8 +182,6 @@ void MediaFrame::pauseVideo() {
     mediaPlayer.pause();
     emit pauseStateChanged(true);
 }
-
-// === Frame-buffer mode ===
 
 void MediaFrame::setFrameBuffer(FrameBufferReader* reader) {
     if (controller) controller->setFrameBuffer(reader);
@@ -190,8 +200,6 @@ void MediaFrame::switchToVideoFile() {
     mode = Mode::VideoFile;
     if (controller) controller->pause();
     stack->setCurrentIndex(0);
-    // If the source was released for a Windows file-lock dance and never reloaded
-    // (e.g. auto-preview ended in FrameBuffer mode), restore it now.
     if (mediaPlayer.source().isEmpty() && !stashedSource.isEmpty()) {
         mediaPlayer.setSource(stashedSource);
     }
@@ -200,17 +208,21 @@ void MediaFrame::switchToVideoFile() {
 void MediaFrame::switchToFrameBuffer() {
     if (mode == Mode::FrameBuffer) return;
     mode = Mode::FrameBuffer;
-    // Pause the existing QMediaPlayer so its audio doesn't keep playing under us
     isPaused = true;
     mediaPlayer.pause();
 #ifdef Q_OS_WIN
-    // Now that the frame buffer is the visible source, drop the QMediaPlayer's hold on
-    // preview.mp4 so the Python renderer can overwrite it (Phase 1 + Phase 2 of the
-    // preview render). The stash lets switchToVideoFile()/reloadVideo() restore the
-    // file path after the render completes.
     QUrl src = mediaPlayer.source();
     if (!src.isEmpty()) stashedSource = src;
     mediaPlayer.setSource(QUrl());
 #endif
     stack->setCurrentIndex(1);
+}
+
+void MediaFrame::switchToImageFile() {
+    if (mode == Mode::ImageFile) return;
+    mode = Mode::ImageFile;
+    isPaused = true;
+    mediaPlayer.pause();
+    if (controller) controller->pause();
+    stack->setCurrentIndex(2);
 }

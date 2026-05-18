@@ -3,6 +3,7 @@
 *.aac
 settings.txt
 VideoCache/
+AudioCache/
 build-release/
 build-windows/
 dist/

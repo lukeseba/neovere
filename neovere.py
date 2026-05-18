@@ -27,20 +27,27 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4", "C:/Users/luke/Downloads/1000044807.mp4"]
+_paths = ["render.mp4", "C:/Users/luke/Downloads/idphoto.jpg"]
 arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 
 api_key = ""
-gpu_enabled = False
+gpu_enabled = True
 dx = 0.25
-dt = 0.25
+dt = 0.5
 
 audio_counter = 0
 
 if gpu_enabled:
-    import cupy as np
+    try:
+        import cupy as np
+    except Exception as e:
+        print(f"[Warning] GPU acceleration unavailable ({e}). Falling back to CPU (numpy).")
+        import numpy as np
+        np.asnumpy = lambda x: np.asarray(x)  # Teaches NumPy to safely ignore CuPy commands
+        gpu_enabled = False
 else:
     import numpy as np
+    np.asnumpy = lambda x: np.asarray(x)
 
 import numpy as rnp
 
@@ -975,6 +982,74 @@ class Audio:
         return self._file_path
 
 
+class ImageFile:
+    """A class to represent and manipulate static images as media assets."""
+
+    def __init__(self, file_path: str) -> None:
+        self.__file_path = file_path
+
+        # Load with unchanged to preserve alpha channel if it exists
+        raw_image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+        if raw_image is None:
+            raise ValueError(f"Could not load image file: {file_path}")
+
+        # If the image has an alpha channel (4 channels), blend it over a black background
+        # so it safely converts to the standard 3-channel BGR format the engine expects
+        if raw_image.shape[2] == 4:
+            alpha = raw_image[:, :, 3] / 255.0
+            bgr = raw_image[:, :, :3]
+
+            # Use standard numpy to avoid GPU setup lag during initialization
+            bg = rnp.zeros_like(bgr, dtype=rnp.float32)
+
+            for c in range(3):
+                bg[:, :, c] = (alpha * bgr[:, :, c])
+            self.__image = bg.astype(rnp.uint8)
+        else:
+            self.__image = raw_image
+
+        self.__height, self.__width = self.__image.shape[:2]
+
+    def get_frame(self, frame_index: int = 0, w=1.0, h=None) -> Frame:
+        """Returns the image as a Frame. The frame_index is ignored since it's static."""
+        with _profile("image.get_frame"):
+            frame = self.__image.copy()
+
+            if gpu_enabled:
+                frame = np.asarray(frame)
+
+            if h is None and w != 1.0:
+                if gpu_enabled:
+                    frame_cpu = np.asnumpy(frame).astype(np.uint8)
+                    frame_cpu = cv2.resize(frame_cpu, (0, 0), fx=w, fy=w)
+                    frame = np.asarray(frame_cpu)
+                else:
+                    frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
+            elif h is not None:
+                if gpu_enabled:
+                    frame_cpu = np.asnumpy(frame).astype(np.uint8)
+                    frame_cpu = cv2.resize(frame_cpu, (w, h))
+                    frame = np.asarray(frame_cpu)
+                else:
+                    frame = cv2.resize(frame, (w, h))
+
+            return Frame(frame)
+
+    def frame_duration(self) -> int:
+        return 999999
+
+    def fps(self) -> float:
+        return renderer.fps()
+
+    def width(self) -> int:
+        return self.__width
+
+    def height(self) -> int:
+        return self.__height
+
+    def file_path(self) -> str:
+        return self.__file_path
+
 import cv2
 import subprocess
 import os
@@ -1697,19 +1772,19 @@ renderer = NonlinearRenderer(640, 480, 24)
 
 #replace 'video' with renderer when getting video.height and such
 
-if _paths:  # Ensure _paths is not empty
-    # Create a dictionary to store Video objects with their names as keys
-
+if _paths:
     for path in _paths:
-        if path:  # Ensure the path is not empty
-            # Extract the media name (file name without extension)
+        if path:
             media_full_name = os.path.splitext(os.path.basename(path))
             media_name = media_full_name[0]
-            media_type = media_full_name[1]
+            media_type = media_full_name[1].lower()
+
             if media_type == ".mp4":
                 media[media_name] = Video(path)
             elif media_type == ".mp3":
                 media[media_name] = Audio(path)
+            elif media_type in [".jpg", ".jpeg", ".png"]:
+                media[media_name] = ImageFile(path)
 
     for media_name in media:
         current_media = media[media_name]
@@ -1723,7 +1798,6 @@ if _paths:  # Ensure _paths is not empty
                 current_media.preload_data()
             except:
                 print("Failed to preload audio data for " + media_name)
-
 
 if len(_paths) != 0:
     class Field:
@@ -2505,16 +2579,13 @@ if len(_paths) != 0:
             return self
 
         def apply(self, pixels: np.ndarray) -> np.ndarray:
-            """Apply the solid color filter to pixel data using the field mask.
+            """Apply the solid color filter to pixel data using the field mask."""
 
-            Parameters:
-                pixels (np.ndarray): The pixel data to apply the color filter to.
+            # Explicitly convert the Python list to an array so CuPy can process it
+            color_array = np.array([self.__b, self.__g, self.__r])
 
-            Returns:
-                np.ndarray: The color-modified pixel data.
-            """
             pixels = np.clip(
-                (pixels * (1 - self._map) + [self.__b, self.__g, self.__r] * self._map),
+                (pixels * (1 - self._map) + color_array * self._map),
                 0, 255
             )
             return pixels

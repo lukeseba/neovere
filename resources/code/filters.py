@@ -88,16 +88,13 @@ if len(_paths) != 0:
             return self
 
         def apply(self, pixels: np.ndarray) -> np.ndarray:
-            """Apply the solid color filter to pixel data using the field mask.
+            """Apply the solid color filter to pixel data using the field mask."""
 
-            Parameters:
-                pixels (np.ndarray): The pixel data to apply the color filter to.
+            # Explicitly convert the Python list to an array so CuPy can process it
+            color_array = np.array([self.__b, self.__g, self.__r])
 
-            Returns:
-                np.ndarray: The color-modified pixel data.
-            """
             pixels = np.clip(
-                (pixels * (1 - self._map) + [self.__b, self.__g, self.__r] * self._map),
+                (pixels * (1 - self._map) + color_array * self._map),
                 0, 255
             )
             return pixels

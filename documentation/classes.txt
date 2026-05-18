@@ -318,6 +318,24 @@
 #        str: File path.
 #
 
+* class ImageFile:
+#A class to represent and manipulate static images as media assets.
+
+    __init__(file_path: str) -> None:
+
+    get_frame(frame_index: int = 0, w=1.0, h=None) -> Frame:
+#    Returns the image as a Frame. The frame_index is ignored since it's static.
+
+    frame_duration() -> int:
+
+    fps() -> float:
+
+    width() -> int:
+
+    height() -> int:
+
+    file_path() -> str:
+
 * class NonlinearRenderer:
 
     __init__(width: int, height: int, fps: int) -> None:

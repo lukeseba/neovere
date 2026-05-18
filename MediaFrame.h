@@ -1,7 +1,3 @@
-//
-// Created by lukebalfanz on 11/6/24.
-//
-
 #ifndef MEDIAFRAME_H
 #define MEDIAFRAME_H
 
@@ -13,12 +9,13 @@
 #include <QVideoWidget>
 #include <QVBoxLayout>
 #include <QStackedWidget>
+#include <QLabel>
 
 class MediaFrame: public MaintainFrame {
     Q_OBJECT
 
 public:
-    enum class Mode { VideoFile, FrameBuffer };
+    enum class Mode { VideoFile, FrameBuffer, ImageFile };
 
     explicit MediaFrame(QWidget *parent = nullptr);
     ~MediaFrame() override;
@@ -40,6 +37,7 @@ public:
     void reloadFrameBufferAudio();                     // re-read the audio file from disk
     void switchToVideoFile();                          // ensure we're in video-file mode
     void switchToFrameBuffer();                        // ensure we're in frame-buffer mode
+    void switchToImageFile();                          // switch to static image viewer
     Mode currentMode() const { return mode; }
     PlaybackController* fbController() { return controller; }
 
@@ -63,6 +61,9 @@ private:
     // Frame-buffer path (new)
     PreviewWidget* fbWidget = nullptr;
     PlaybackController* controller = nullptr;
+    
+    // Static Image path (new)
+    QLabel* imageWidget = nullptr;
 };
 
 #endif //MEDIAFRAME_H

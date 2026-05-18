@@ -38,9 +38,16 @@ dt = 1.0 #[%$#dt#$%]
 audio_counter = 0
 
 if gpu_enabled:
-    import cupy as np
+    try:
+        import cupy as np
+    except Exception as e:
+        print(f"[Warning] GPU acceleration unavailable ({e}). Falling back to CPU (numpy).")
+        import numpy as np
+        np.asnumpy = lambda x: np.asarray(x)  # Teaches NumPy to safely ignore CuPy commands
+        gpu_enabled = False
 else:
     import numpy as np
+    np.asnumpy = lambda x: np.asarray(x)
 
 import numpy as rnp
 
