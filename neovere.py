@@ -27,13 +27,13 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4", "C:/Users/luke/Downloads/idphoto.jpg"]
+_paths = ["render.mp4", "C:/Users/luke/Videos/snd/taipei/00144.mp4", "C:/Users/luke/Videos/snd/taipei/00145.mp4", "C:/Users/luke/Videos/snd/taipei/00147.mp4", "C:/Users/luke/Videos/snd/taipei/00151.mp4", "C:/Users/luke/Videos/snd/taipei/1000053123.mp4", "C:/Users/luke/Videos/snd/taipei/1000053124.mp4", "C:/Users/luke/Videos/snd/taipei/1000053125.mp4", "C:/Users/luke/Videos/snd/taipei/1000053126.mp4", "C:/Users/luke/Videos/snd/taipei/1000053127.mp4", "C:/Users/luke/Videos/snd/taipei/1000053128.mp4", "C:/Users/luke/Videos/snd/taipei/1000053129.mp4", "C:/Users/luke/Videos/snd/taipei/1000053130.mp4", "C:/Users/luke/Videos/snd/taipei/1000053131.mp4", "C:/Users/luke/Videos/snd/taipei/1000053132.mp4", "C:/Users/luke/Videos/snd/taipei/taipei.mp3", "C:/Users/luke/Videos/snd/taipei/taipeiaudio.mp3", "C:/Users/luke/Videos/snd/taipei/00144map.mp4"]
 arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 
-api_key = ""
+api_key = "" #[%$# #$%]
 gpu_enabled = True
-dx = 0.25
-dt = 0.5
+dx = 0.5
+dt = 1.0
 
 audio_counter = 0
 
@@ -301,42 +301,23 @@ class Color_Frame(Frame):
     """A class to represent and manipulate a frame composed of a single RGB color"""
 
     def __init__(self, width: int, height: int, color: tuple = (0, 0, 0)):
-        """Initialize a Color_Frame with a specified width, height, and an optional RGB color.
-
-        Parameters:
-            width (int): The width of the frame in pixels.
-            height (int): The height of the frame in pixels.
-            color (tuple, optional): A tuple representing the RGB color to fill the frame.
-                                      Defaults to (0, 0, 0), which is black.
-
-        Raises:
-            ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
-        """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
             raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
 
-        # Create a NumPy array filled with the specified color
-        pixels = np.full((height, width, 3), color, dtype=np.uint8)
+        # Create an empty array and fill it using a GPU/CPU safe array cast
+        pixels = np.zeros((height, width, 3), dtype=np.uint8)
+        pixels[:] = np.array(color, dtype=np.uint8)
 
         super().__init__(pixels)
 
     def change_color(self, color: tuple) -> None:
-        """Change the entire frame's color to the specified RGB value.
-
-        Parameters:
-            color (tuple): A tuple representing the new RGB color to set the frame to.
-
-        Raises:
-            ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
-        """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
             raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
 
-        # Update all pixel values in the frame to the new color
-        self._pixels[:] = color
-
+        # Safely wrap the tuple for GPU compatibility here as well
+        self._pixels[:] = np.array(color, dtype=np.uint8)
 
 
 class Video:
@@ -744,15 +725,18 @@ class Audio:
             return self._file_path
 
         output_audio = "full_audio.wav"
+
+        # REMOVED the forced "-ar" downsampling flag so the WAV
+        # inherits the exact native sample rate of the source file
         command = [
             "ffmpeg", "-y",
             "-i", self._file_path,
             "-vn" if self._file_type == "mp4" else "",
             "-f", "wav",
             "-ac", "1",
-            "-ar", str(self._sample_rate),
             output_audio
         ]
+
         command = [arg for arg in command if arg]
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
 
@@ -937,7 +921,14 @@ class Audio:
             else:
                 return FrameAudio(self._audio_data[-1])
         else:
-            return FrameAudio(self._audio_data[frame_index * int(self._fps / renderer.fps())])
+            # FIX: Multiply by the exact float ratio BEFORE casting to int
+            # This perfectly maps any video framerate to the 60 FPS audio cache!
+            target_idx = int(frame_index * (self._fps / renderer.fps()))
+
+            if target_idx < len(self._audio_data):
+                return FrameAudio(self._audio_data[target_idx])
+            else:
+                return FrameAudio(self._audio_data[-1])
 
     def length(self) -> float:
         """Return the length of the audio in seconds.
@@ -945,17 +936,16 @@ class Audio:
         Returns:
             float: Total duration of the audio file.
         """
-        if not self._audio_data.all():
+        # If we already calculated the duration during preloading, return it instantly
+        if hasattr(self, '_duration') and self._duration > 0:
+            return self._duration
+
+        # Safely check if the audio data list is empty without using .all()
+        if not getattr(self, '_audio_data', []):
+            # This automatically sets self._duration
             self._load_audio_data()
 
-        audio_path = self._extract_full_audio()
-        sample_rate, audio_data = wavfile.read(audio_path)
-        audio_length = len(audio_data) / sample_rate
-
-        if self._file_type != "wav":
-            os.remove(audio_path)
-
-        return audio_length
+        return getattr(self, '_duration', 0.0)
 
     def fps(self) -> float:
         """Get the frames per second associated with the video or assumed for audio.
@@ -2196,13 +2186,18 @@ if len(_paths) != 0:
                 raise ValueError(f"Thickness must be a positive number, but got {thickness}.")
 
             super().__init__()
+
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
             cv2.line(
-                self._map,
+                map_cpu,
                 (int(x1), int(y1)),
                 (int(x2), int(y2)),
                 color=255,
                 thickness=int(thickness)
             )
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FRect(Field):
@@ -2227,13 +2222,18 @@ if len(_paths) != 0:
                 raise ValueError(f"Thickness must be a positive number or -1 to fill, but got {thickness}.")
 
             super().__init__()
+
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
             cv2.rectangle(
-                self._map,
+                map_cpu,
                 (int(x1), int(y1)),
                 (int(x2), int(y2)),
                 color=255,
                 thickness=int(thickness)
             )
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FEllipse(Field):
@@ -2271,9 +2271,10 @@ if len(_paths) != 0:
             # Convert total width and height into semi-axes
             axes = (int(ellipse_width // 2), int(ellipse_height // 2))
 
-            # Draw the ellipse onto the map
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
             cv2.ellipse(
-                self._map,
+                map_cpu,
                 (int(center[0]), int(center[1])),
                 axes,
                 angle,
@@ -2281,6 +2282,8 @@ if len(_paths) != 0:
                 255,     # White color
                 thickness
             )
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FPoly(Field):
@@ -2305,11 +2308,21 @@ if len(_paths) != 0:
 
             super().__init__()
 
-            # Reshape points to (N, 1, 2) as expected by OpenCV
-            points = points.reshape((-1, 1, 2)).astype(np.int32)
+            # Safely pull the points array down to the CPU if it was created on the GPU
+            if hasattr(points, 'get'):
+                pts_cpu = points.get()
+            else:
+                pts_cpu = rnp.asarray(points)
 
-            # Fill the polygon on the map
-            cv2.fillPoly(self._map, [points], color=255)
+            # Reshape points to (N, 1, 2) as expected by OpenCV
+            pts_cpu = pts_cpu.reshape((-1, 1, 2)).astype(rnp.int32)
+
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
+            cv2.fillPoly(map_cpu, [pts_cpu], color=255)
+
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FText(Field):
@@ -2363,7 +2376,9 @@ if len(_paths) != 0:
                 font_scale (float): Scale factor for the font size.
                 custom_font (str): Path to a .ttf font file.
             """
-            pil_image = Image.fromarray(self._map)
+            # Create a blank CPU canvas so Pillow doesn't crash on CuPy arrays
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
+            pil_image = Image.fromarray(map_cpu)
             draw = ImageDraw.Draw(pil_image)
 
             try:
@@ -2380,7 +2395,9 @@ if len(_paths) != 0:
             bottom_left_y = int(position[1] - text_height / 2)
 
             draw.text((bottom_left_x, bottom_left_y), text, font=font, fill=255)
-            self._map = np.array(pil_image)
+
+            # Push back to GPU
+            self._map = np.asarray(rnp.array(pil_image))
 
         def _draw_with_opencv(
                 self,
@@ -2404,8 +2421,10 @@ if len(_paths) != 0:
             bottom_left_x = int(position[0] - text_width / 2)
             bottom_left_y = int(position[1] + text_height / 2)
 
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
             cv2.putText(
-                self._map,
+                map_cpu,
                 text,
                 (bottom_left_x, bottom_left_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
@@ -2414,8 +2433,8 @@ if len(_paths) != 0:
                 thickness,
                 lineType=cv2.LINE_AA
             )
-
-
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FAudio(Field):

@@ -395,13 +395,18 @@ if len(_paths) != 0:
                 raise ValueError(f"Thickness must be a positive number, but got {thickness}.")
 
             super().__init__()
+
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
             cv2.line(
-                self._map,
+                map_cpu,
                 (int(x1), int(y1)),
                 (int(x2), int(y2)),
                 color=255,
                 thickness=int(thickness)
             )
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FRect(Field):
@@ -426,13 +431,18 @@ if len(_paths) != 0:
                 raise ValueError(f"Thickness must be a positive number or -1 to fill, but got {thickness}.")
 
             super().__init__()
+
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
             cv2.rectangle(
-                self._map,
+                map_cpu,
                 (int(x1), int(y1)),
                 (int(x2), int(y2)),
                 color=255,
                 thickness=int(thickness)
             )
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FEllipse(Field):
@@ -470,9 +480,10 @@ if len(_paths) != 0:
             # Convert total width and height into semi-axes
             axes = (int(ellipse_width // 2), int(ellipse_height // 2))
 
-            # Draw the ellipse onto the map
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
             cv2.ellipse(
-                self._map,
+                map_cpu,
                 (int(center[0]), int(center[1])),
                 axes,
                 angle,
@@ -480,6 +491,8 @@ if len(_paths) != 0:
                 255,     # White color
                 thickness
             )
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FPoly(Field):
@@ -504,11 +517,21 @@ if len(_paths) != 0:
 
             super().__init__()
 
-            # Reshape points to (N, 1, 2) as expected by OpenCV
-            points = points.reshape((-1, 1, 2)).astype(np.int32)
+            # Safely pull the points array down to the CPU if it was created on the GPU
+            if hasattr(points, 'get'):
+                pts_cpu = points.get()
+            else:
+                pts_cpu = rnp.asarray(points)
 
-            # Fill the polygon on the map
-            cv2.fillPoly(self._map, [points], color=255)
+            # Reshape points to (N, 1, 2) as expected by OpenCV
+            pts_cpu = pts_cpu.reshape((-1, 1, 2)).astype(rnp.int32)
+
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
+            cv2.fillPoly(map_cpu, [pts_cpu], color=255)
+
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FText(Field):
@@ -562,7 +585,9 @@ if len(_paths) != 0:
                 font_scale (float): Scale factor for the font size.
                 custom_font (str): Path to a .ttf font file.
             """
-            pil_image = Image.fromarray(self._map)
+            # Create a blank CPU canvas so Pillow doesn't crash on CuPy arrays
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
+            pil_image = Image.fromarray(map_cpu)
             draw = ImageDraw.Draw(pil_image)
 
             try:
@@ -579,7 +604,9 @@ if len(_paths) != 0:
             bottom_left_y = int(position[1] - text_height / 2)
 
             draw.text((bottom_left_x, bottom_left_y), text, font=font, fill=255)
-            self._map = np.array(pil_image)
+
+            # Push back to GPU
+            self._map = np.asarray(rnp.array(pil_image))
 
         def _draw_with_opencv(
                 self,
@@ -603,8 +630,10 @@ if len(_paths) != 0:
             bottom_left_x = int(position[0] - text_width / 2)
             bottom_left_y = int(position[1] + text_height / 2)
 
+            # Safely draw on CPU
+            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
             cv2.putText(
-                self._map,
+                map_cpu,
                 text,
                 (bottom_left_x, bottom_left_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
@@ -613,8 +642,8 @@ if len(_paths) != 0:
                 thickness,
                 lineType=cv2.LINE_AA
             )
-
-
+            # Push back to GPU
+            self._map = np.asarray(map_cpu)
 
 
     class FAudio(Field):

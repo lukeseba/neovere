@@ -214,42 +214,23 @@ class Color_Frame(Frame):
     """A class to represent and manipulate a frame composed of a single RGB color"""
 
     def __init__(self, width: int, height: int, color: tuple = (0, 0, 0)):
-        """Initialize a Color_Frame with a specified width, height, and an optional RGB color.
-
-        Parameters:
-            width (int): The width of the frame in pixels.
-            height (int): The height of the frame in pixels.
-            color (tuple, optional): A tuple representing the RGB color to fill the frame.
-                                      Defaults to (0, 0, 0), which is black.
-
-        Raises:
-            ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
-        """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
             raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
 
-        # Create a NumPy array filled with the specified color
-        pixels = np.full((height, width, 3), color, dtype=np.uint8)
+        # Create an empty array and fill it using a GPU/CPU safe array cast
+        pixels = np.zeros((height, width, 3), dtype=np.uint8)
+        pixels[:] = np.array(color, dtype=np.uint8)
 
         super().__init__(pixels)
 
     def change_color(self, color: tuple) -> None:
-        """Change the entire frame's color to the specified RGB value.
-
-        Parameters:
-            color (tuple): A tuple representing the new RGB color to set the frame to.
-
-        Raises:
-            ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
-        """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
             raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
 
-        # Update all pixel values in the frame to the new color
-        self._pixels[:] = color
-
+        # Safely wrap the tuple for GPU compatibility here as well
+        self._pixels[:] = np.array(color, dtype=np.uint8)
 
 
 class Video:
@@ -657,15 +638,18 @@ class Audio:
             return self._file_path
 
         output_audio = "full_audio.wav"
+
+        # REMOVED the forced "-ar" downsampling flag so the WAV
+        # inherits the exact native sample rate of the source file
         command = [
             "ffmpeg", "-y",
             "-i", self._file_path,
             "-vn" if self._file_type == "mp4" else "",
             "-f", "wav",
             "-ac", "1",
-            "-ar", str(self._sample_rate),
             output_audio
         ]
+
         command = [arg for arg in command if arg]
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
 
@@ -850,7 +834,14 @@ class Audio:
             else:
                 return FrameAudio(self._audio_data[-1])
         else:
-            return FrameAudio(self._audio_data[frame_index * int(self._fps / renderer.fps())])
+            # FIX: Multiply by the exact float ratio BEFORE casting to int
+            # This perfectly maps any video framerate to the 60 FPS audio cache!
+            target_idx = int(frame_index * (self._fps / renderer.fps()))
+
+            if target_idx < len(self._audio_data):
+                return FrameAudio(self._audio_data[target_idx])
+            else:
+                return FrameAudio(self._audio_data[-1])
 
     def length(self) -> float:
         """Return the length of the audio in seconds.
@@ -858,17 +849,16 @@ class Audio:
         Returns:
             float: Total duration of the audio file.
         """
-        if not self._audio_data.all():
+        # If we already calculated the duration during preloading, return it instantly
+        if hasattr(self, '_duration') and self._duration > 0:
+            return self._duration
+
+        # Safely check if the audio data list is empty without using .all()
+        if not getattr(self, '_audio_data', []):
+            # This automatically sets self._duration
             self._load_audio_data()
 
-        audio_path = self._extract_full_audio()
-        sample_rate, audio_data = wavfile.read(audio_path)
-        audio_length = len(audio_data) / sample_rate
-
-        if self._file_type != "wav":
-            os.remove(audio_path)
-
-        return audio_length
+        return getattr(self, '_duration', 0.0)
 
     def fps(self) -> float:
         """Get the frames per second associated with the video or assumed for audio.

@@ -137,27 +137,8 @@
 #A class to represent and manipulate a frame composed of a single RGB color
 
     __init__(width: int, height: int, color: tuple = (0, 0, 0)):
-#    Initialize a Color_Frame with a specified width, height, and an optional RGB color.
-#
-#    Parameters:
-#        width (int): The width of the frame in pixels.
-#        height (int): The height of the frame in pixels.
-#        color (tuple, optional): A tuple representing the RGB color to fill the frame.
-#        Defaults to (0, 0, 0), which is black.
-#
-#    Raises:
-#        ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
-#
 
     change_color(color: tuple) -> None:
-#    Change the entire frame's color to the specified RGB value.
-#
-#    Parameters:
-#        color (tuple): A tuple representing the new RGB color to set the frame to.
-#
-#    Raises:
-#        ValueError: If the provided color is not a valid RGB tuple with integers between 0 and 255.
-#
 
 * class Video:
 #A class to represent and manipulate a video file, including reading frames and extracting audio.
