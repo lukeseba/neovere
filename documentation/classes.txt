@@ -117,11 +117,6 @@
 
     preview(wait_for_exit: bool = False, title: str = "Frame Preview") -> None:
 #    Display the frame in a window for previewing.
-#
-#    Parameters:
-#        wait_for_exit (bool): If True, waits until the user closes the window or presses 'q' key.
-#        title (str): The window title for the preview.
-#
 
     crop(x1: int, y1: int, x2: int, y2: int) -> None:
 #    Crop the frame to a rectangle defined by two corners.
@@ -251,11 +246,12 @@
 #        ValueError: If the provided file extension is unsupported.
 #
 
-    preload_data(reload: bool = False) -> None:
+    preload_data(reload: bool = False, padding_factor: int = 1) -> None:
 #    Preload and process audio into per-frame features (volume, spectrum) for faster access.
 #
 #    Parameters:
 #        reload (bool): Whether to force reloading even if cached data exists.
+#        padding_factor (int): Multiplier for FFT zero-padding to increase frequency resolution. Default is 1 (no padding).
 #
 
     frame_audio(frame_index: int) -> FrameAudio:
@@ -472,5 +468,71 @@
 #
 #    Returns:
 #        Audio: An Audio object containing the synthesized speech.
+#
+
+class Audio_Analyzer:
+#A suite of tools for advanced audio frequency and transient analysis.
+
+    get_range_mag(freqs: rnp.ndarray, mags: rnp.ndarray, start_hz: float, end_hz: float) -> float:
+#
+#    Calculates the energy of a specific frequency band relative to the
+#    total energy of the entire audio frame.
+#    Returns a value from 0.0 (silent) to 1.0 (all audio energy is in this band).
+#
+
+    calculate_bloom(freqs: rnp.ndarray, mags: rnp.ndarray, peak_global_idx: int, window_hz: float = 40.0) -> float:
+#
+#    Calculates the transient splash relative to the peak magnitude.
+#    Returns a value from 0.0 (pure tone) to 1.0 (maximum noisy splash).
+#
+
+    get_peak_data(freqs: rnp.ndarray, mags: rnp.ndarray, start_hz: float, end_hz: float) -> tuple[float, int]:
+#
+#    Finds the loudest frequency within a range.
+#    Returns a tuple containing:
+#    1. peak_norm: The normalized position of the peak (0.0 to 1.0) between start_hz and end_hz.
+#    2. global_peak_idx: The exact array index of the peak (useful for the bloom calculator).
+#
+
+    get_mean_frequency(freqs: rnp.ndarray, mags: rnp.ndarray, start_hz: float, end_hz: float) -> tuple[float, float]:
+#
+#    Calculates the mean frequency (spectral centroid) within a specific range.
+#    Returns a tuple containing:
+#    1. mean_norm: The normalized position of the mean frequency (0.0 to 1.0) between start_hz and end_hz.
+#    2. exact_freq: The exact calculated mean frequency in Hz.
+#
+
+    draw_visualizer(frame, frame_audio, x_range: tuple = (0.0, 0.5), y_range: tuple = (0.5, 1.0), freq_range: tuple = None, color: tuple = (255, 0, 0)):
+#
+#    Draws an audio visualizer graph directly onto the provided frame.
+#    x_range and y_range map the placement via normalized coordinates (0.0 to 1.0).
+#
+
+class Color_Picker:
+
+    average_color(frame: Frame, points: list[tuple[int, int]]) -> tuple[int, int, int]:
+#    Calculate the average color within specified (x, y) points in the frame.
+#
+#    Parameters:
+#        frame (Frame): The Frame object to sample colors from.
+#        points (List[Tuple[int, int]]): A list of (x, y) tuples representing pixel coordinates.
+#
+#    Returns:
+#        Tuple[int, int, int]: The average color as an (R, G, B) tuple.
+#
+#    Raises:
+#        ValueError: If points list is empty or contains out-of-bounds coordinates.
+#
+
+class Media_Optimizer:
+
+    downscale_image(input_path: str, output_path: str, scale: float) -> bool:
+#
+#    Reads an image, downscales it by a float multiplier, and saves it.
+#
+#    :param input_path: Path to the original image.
+#    :param output_path: Path to save the downscaled image.
+#    :param scale: Float multiplier (e.g., 0.5 for half size, 0.25 for quarter size).
+#    :return: True if successful, False if the image couldn't be read.
 #
 

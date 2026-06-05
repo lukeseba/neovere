@@ -302,12 +302,20 @@
 #    displays a volume indicator based on the RMS volume of the frame.
 #
 #    Parameters:
-#        aud (FrameAudio): The FrameAudio object containing the audio data (frequencies and magnitudes).
-#        start (int, optional): The starting index of the frequency range to visualize (default is 0).
-#        end (int, optional): The ending index of the frequency range to visualize. If None, uses the full range.
+#        aud (FrameAudio): The FrameAudio object containing the audio data.
+#        start (int, optional): The starting frequency in Hz (default is 0).
+#        end (int, optional): The ending frequency in Hz. If None, uses the full range.
 #
-#    Raises:
-#        ValueError: If the start or end indices are invalid.
-#        Exception: If an error occurs during the visualization process.
+
+class FDepth_Slice(Field):
+
+    __init__(depth_frame: 'Frame', feather: float, lower_bound: float, upper_bound: float) -> None:
+#    Initialize a field from a depth map using a feathered slice between two thresholds.
+#
+#    Parameters:
+#        depth_frame: The frame containing the depth map.
+#        feather: The width of the smooth transition zone on both edges.
+#        lower_bound: The minimum luminance to keep (0.0 to 1.0).
+#        upper_bound: The maximum luminance to keep (0.0 to 1.0).
 #
 

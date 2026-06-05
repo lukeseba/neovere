@@ -36,14 +36,32 @@ if len(_paths) != 0:
             render_height = renderer.height()
             render_width = renderer.width()
 
+            # Fast path: If the map is already perfectly sized, use it instantly
+            if full_map.shape[0] == render_height and full_map.shape[1] == render_width:
+                self._map = full_map
+                return self
+
+            # Otherwise, force it to renderer dimensions to prevent broadcasting crashes
+            target_map = np.zeros((render_height, render_width, 1), dtype=np.float32)
+
             orig_height, orig_width = full_map.shape[:2]
 
-            start_y = max((orig_height - render_height) // 2, 0)
-            start_x = max((orig_width - render_width) // 2, 0)
-            end_y = start_y + min(render_height, orig_height)
-            end_x = start_x + min(render_width, orig_width)
+            start_y = max((render_height - orig_height) // 2, 0)
+            start_x = max((render_width - orig_width) // 2, 0)
 
-            self._map = full_map[start_y:end_y, start_x:end_x]
+            copy_h = min(render_height, orig_height)
+            copy_w = min(render_width, orig_width)
+
+            src_start_y = max((orig_height - render_height) // 2, 0)
+            src_start_x = max((orig_width - render_width) // 2, 0)
+
+            # BRIDGE: Safely extract to CPU if it's on the GPU
+            full_map_cpu = full_map.get() if hasattr(full_map, 'get') else full_map
+
+            target_map[start_y:start_y+copy_h, start_x:start_x+copy_w] = full_map_cpu[src_start_y:src_start_y+copy_h, src_start_x:src_start_x+copy_w]
+
+            # Push back to active hardware
+            self._map = np.asarray(target_map)
 
             return self
 

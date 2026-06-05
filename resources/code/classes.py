@@ -74,6 +74,11 @@ class Frame:
         if pixels.ndim not in (2, 3):
             raise ValueError("Frame must be a 2D (grayscale) or 3D (color) array.")
 
+        # Auto-promote 2D grayscale to 3D RGB
+        if pixels.ndim == 2:
+            # Duplicate the single channel 3 times across the last axis
+            pixels = np.stack([pixels, pixels, pixels], axis=-1)
+
         self._pixels = pixels.astype(np.uint8)
         self._original_pixels = pixels.astype(np.uint8)
         self._height, self._width = self._pixels.shape[:2]
@@ -94,6 +99,8 @@ class Frame:
         """
         with _profile(f"filter:{filter.__class__.__name__}"):
             self._pixels = filter.apply(self.get_pixels().astype(np.uint16)).astype(np.uint8)
+
+        return self
 
     def get_pixels(self, standard_size: bool = False) -> np.ndarray:
         """Return the frame's pixel data as a NumPy array.
@@ -130,6 +137,8 @@ class Frame:
 
         self._pixels = new_flat_pixels.reshape(height, width, 3).astype(np.uint8)
 
+        return self
+
     def resize(self, w: int, h: int) -> None:
         """Resize the frame to a new width and height.
 
@@ -137,9 +146,19 @@ class Frame:
             w (int): The target width.
             h (int): The target height.
         """
-        self._pixels = cv2.resize(self._original_pixels, (w, h))
+        # 1. BRIDGE TO CPU
+        pixels_cpu = self._original_pixels.get() if hasattr(self._original_pixels, 'get') else self._original_pixels
+
+        # 2. PERFORM ON CPU
+        resized = cv2.resize(pixels_cpu, (w, h))
+
+        # 3. BRIDGE TO GPU (if enabled)
+        self._pixels = np.asarray(resized)
+
         self._width = w
         self._height = h
+
+        return self
 
     def set_width(self, w: int) -> None:
         """Set a new width for the frame while keeping the current height.
@@ -174,17 +193,14 @@ class Frame:
         return self._height
 
     def preview(self, wait_for_exit: bool = False, title: str = "Frame Preview") -> None:
-        """Display the frame in a window for previewing.
-
-        Parameters:
-            wait_for_exit (bool): If True, waits until the user closes the window or presses 'q' key.
-            title (str): The window title for the preview.
-        """
+        """Display the frame in a window for previewing."""
         window_name = title
-        if gpu_enabled:
-            cv2.imshow(window_name, np.asnumpy(self._pixels))
-        else:
-            cv2.imshow(window_name, self._pixels)
+
+        # Safely extract to CPU without relying on np.asnumpy
+        pixels_cpu = self._pixels.get() if hasattr(self._pixels, 'get') else self._pixels
+
+        cv2.imshow(window_name, pixels_cpu)
+
         if wait_for_exit:
             while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
                 if cv2.waitKey(100) & 0xFF == ord('q'):
@@ -208,6 +224,8 @@ class Frame:
 
         self._pixels = self._pixels[y1:y2, x1:x2]
         self._height, self._width = self._pixels.shape[:2]
+
+        return self
 
 
 class Color_Frame(Frame):
@@ -452,12 +470,17 @@ class Video:
             else:
                 # Raw cache holds shared arrays; copy to protect from in-place filter mutation
                 frame = cached.copy()
-            if gpu_enabled:
-                frame = np.asarray(frame)
+
+            # 1. ALWAYS perform OpenCV resizing on the CPU first
             if h is None and w != 1.0:
                 frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
             elif h is not None:
                 frame = cv2.resize(frame, (w, h))
+
+            # 2. THEN push the final sized frame to the GPU
+            if gpu_enabled:
+                frame = np.asarray(frame)
+
             return Frame(frame)
 
         # Map scaled (preview) index to source index
@@ -467,8 +490,6 @@ class Video:
             source_idx = frame_index
 
         # For small forward jumps, sequential read+discard is faster than seek+decode
-        # because seek pays a full keyframe-decode cost. For backward or large forward
-        # jumps, fall back to seek which is faster than re-reading huge ranges.
         SEEK_THRESHOLD = 60
         delta = source_idx - self.__current_source_pos
         if 0 <= delta <= SEEK_THRESHOLD:
@@ -479,16 +500,22 @@ class Video:
             self.__video.set(cv2.CAP_PROP_POS_FRAMES, source_idx)
             ret, frame = self.__video.read()
         self.__current_source_pos = source_idx + 1
+
         if ret:
-            if gpu_enabled:
-                frame = np.asarray(frame)
             # Always ensure the loaded frame strictly matches the expected dimensions
             if frame.shape[1] != self.__width or frame.shape[0] != self.__height:
                 frame = cv2.resize(frame, (self.__width, self.__height))
+
+            # 1. ALWAYS perform OpenCV resizing on the CPU first
             if h is None and w != 1.0:
                 frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
             elif h is not None:
                 frame = cv2.resize(frame, (w, h))
+
+            # 2. THEN push the final sized frame to the GPU
+            if gpu_enabled:
+                frame = np.asarray(frame)
+
             return Frame(frame)
         else:
             raise ValueError(f"Frame {frame_index} could not be read. The video may be closed.")
@@ -744,20 +771,16 @@ class Audio:
                 encoded += f"_{ord(char)}_"
         return encoded
 
-    def preload_data(self, reload: bool = False) -> None:
+    def preload_data(self, reload: bool = False, padding_factor: int = 1) -> None:
         """Preload and process audio into per-frame features (volume, spectrum) for faster access.
 
         Parameters:
             reload (bool): Whether to force reloading even if cached data exists.
+            padding_factor (int): Multiplier for FFT zero-padding to increase frequency resolution. Default is 1 (no padding).
         """
-        # AudioCache/ may not exist yet on first run in a fresh workspace
-        # (e.g. ~/Documents/Neovere/ created by the packaged .app on first launch).
-        # Without this, rnp.save() below fails with FileNotFoundError and the
-        # exception propagates to setVideo.py's bare `except`, which silently
-        # swallows it — leaving self._loaded == False so subsequent frame_audio
-        # calls raise "Audio data not preloaded".
         os.makedirs("AudioCache", exist_ok=True)
-        cache_file = f"AudioCache/{self._encode_cache_name(self._file_path)}.npy"
+
+        cache_file = f"AudioCache/{self._encode_cache_name(self._file_path)}_pad{padding_factor}.npy"
 
         if os.path.isfile(cache_file) and not reload:
             full_audio_data = rnp.load(cache_file, allow_pickle=True)
@@ -787,8 +810,12 @@ class Audio:
                     break
 
                 volume = np.sqrt(np.mean(frame_audio ** 2))
-                yf = fft(frame_audio)
-                xf = fftfreq(len(frame_audio), 1 / self._sample_rate)
+
+                # 💥 NEW: Apply the dynamic padding factor to the math
+                fft_size = len(frame_audio) * padding_factor
+
+                yf = fft(frame_audio, n=fft_size)
+                xf = fftfreq(fft_size, 1 / self._sample_rate)
 
                 positive_frequencies = xf[:len(yf) // 2]
                 magnitude = rnp.abs(yf[:len(yf) // 2])
@@ -804,10 +831,6 @@ class Audio:
                 "sample rate": self._sample_rate
             })
             rnp.save(cache_file, self._audio_data)
-            # Strip the metadata trailer back off so the in-memory layout matches
-            # the cache-hit branch above (which does full_audio_data[:-1]).
-            # Without this, frame_audio(N-1) returns the metadata dict and blows
-            # up with KeyError('frequencies').
             self._audio_data = self._audio_data[:-1]
 
         self._loaded = True
@@ -896,8 +919,11 @@ class ImageFile:
         if raw_image is None:
             raise ValueError(f"Could not load image file: {file_path}")
 
-        # If the image has an alpha channel (4 channels), blend it over a black background
-        # so it safely converts to the standard 3-channel BGR format the engine expects
+        # 💥 THE FIX: Safely scale 16-bit Blender exports down to 8-bit BEFORE any math!
+        if raw_image.dtype == np.uint16:
+            raw_image = (raw_image / 256).astype(np.uint8)
+
+        # Now, the image is guaranteed to be 8-bit. The alpha math will work perfectly.
         if raw_image.shape[2] == 4:
             alpha = raw_image[:, :, 3] / 255.0
             bgr = raw_image[:, :, :3]
@@ -1287,10 +1313,10 @@ class NonlinearRenderer:
                 self.__fps,
                 (self.__width, self.__height)
             )
-            unordered_render = cv2.VideoCapture("unordered_render.mp4")
+            frame_map = {logical_idx: write_idx for write_idx, logical_idx in enumerate(self.__frame_indices)}
 
             for frame_index in range(self.__max_frame_index + 1):
-                unordered_idx = self.__get_unordered_frame_idx(frame_index)
+                unordered_idx = frame_map.get(frame_index, -1)
                 if unordered_idx == -1:
                     blank_frame = cv2.UMat(self.__height, self.__width, cv2.CV_8UC3, [0, 0, 0])
                     ordered_writer.write(blank_frame)
@@ -1372,10 +1398,21 @@ class NonlinearRenderer:
                 print("<<<NEO_AUDIO_READY>>>", flush=True)
                 print("Preview compiled as preview.mp4 (with audio)")
             else:
+                import time # Ensure time is available
                 # No audio attached this render — invalidate the cache so phase 1 falls
                 # back to silent next time.
                 if os.path.exists("cached_preview_audio.aac"):
-                    os.remove("cached_preview_audio.aac")
+                    # Give the Qt App up to 1.5 seconds to drop the file handle
+                    for _attempt in range(30):
+                        try:
+                            os.remove("cached_preview_audio.aac")
+                            break # Success!
+                        except PermissionError:
+                            time.sleep(0.05)
+                    else:
+                        # Soft-fail: If Qt stubbornly holds it, don't crash the whole script!
+                        print("[Warning] Qt is still holding the audio cache. Will overwrite next time.")
+
                 print("Preview compiled as preview.mp4 (silent)")
         elif self.__audios:
             with _profile("renderer.attach_audios"):

@@ -10,6 +10,8 @@
 #include <QPainter>
 #include <QStyleOptionSlider>
 #include <QMouseEvent>
+#include <QGuiApplication>
+#include <QClipboard>
 
 VideoSlider::VideoSlider(MediaFrame *panel, int size, QWidget *parent) : QSlider(Qt::Horizontal, parent) {
     this->mediaPanel = panel;
@@ -191,6 +193,32 @@ void VideoSlider::updateTimeStamp() {
 
 void VideoSlider::assignButton(QPushButton *btn) {
     this->button = btn;
+
+    // Connect the button click to our clipboard logic
+    QObject::connect(button, &QPushButton::clicked, [this]() {
+        qint64 currentPosMs = 0;
+
+        // 1. Get the current position in milliseconds based on the mode
+        if (mediaPanel->currentMode() == MediaFrame::Mode::VideoFile) {
+            currentPosMs = mediaPanel->getPlayer()->position();
+        } else {
+            currentPosMs = mediaPanel->fbController()->positionMs();
+        }
+
+        // 2. Define the framerate.
+        // (If your engine tracks this dynamically, replace 24.0 with mediaPanel->fps() or similar)
+        double fps = 24.0;
+
+        // 3. Convert milliseconds to the exact frame index
+        qint64 currentFrame = qRound((currentPosMs / 1000.0) * fps);
+
+        // 4. Copy the frame number to the system clipboard
+        QClipboard *clipboard = QGuiApplication::clipboard();
+        clipboard->setText(QString::number(currentFrame));
+
+        // Optional visual feedback: briefly show it was copied (it will be overwritten on the next tick)
+        button->setText("Copied: " + QString::number(currentFrame));
+    });
 }
 
 QString VideoSlider::convertToTimestamp(int seconds) {

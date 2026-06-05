@@ -176,12 +176,18 @@ if len(_paths) != 0:
             if width >= 32000 or height >= 32000:
                 raise ValueError("Image too large for OpenCV warpAffine.")
 
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
             translation_matrix = np.float32([[1, 0, dx], [0, 1, dy]])
-            self._map = cv2.warpAffine(
-                self._map, translation_matrix, (width, height),
+            moved = cv2.warpAffine(
+                map_cpu, translation_matrix, (width, height),
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=255 if self.inverted else 0
             )
+
+            # 2. BRIDGE TO GPU
+            self._map = np.asarray(moved)
             return self
 
         def resize(self, width_or_scale: int or float, height: int = None) -> 'Field':
@@ -204,14 +210,25 @@ if len(_paths) != 0:
 
             fill_value = 255 if self.inverted else 0
 
-            if width > self._map.shape[1] or height > self._map.shape[0]:
-                new_map = np.full((height, width), fill_value, dtype=np.uint8)
-                overlap_x_end = min(self._map.shape[1], width)
-                overlap_y_end = min(self._map.shape[0], height)
-                new_map[:overlap_y_end, :overlap_x_end] = self._map[:overlap_y_end, :overlap_x_end]
-                self._map = new_map
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            if width > map_cpu.shape[1] or height > map_cpu.shape[0]:
+                # FIX: Explicitly import standard numpy locally to bypass any global CuPy aliases
+                import numpy as standard_np
+                new_map = standard_np.full((height, width), fill_value, dtype=standard_np.uint8)
+
+                overlap_x_end = min(map_cpu.shape[1], width)
+                overlap_y_end = min(map_cpu.shape[0], height)
+                new_map[:overlap_y_end, :overlap_x_end] = map_cpu[:overlap_y_end, :overlap_x_end]
+
+                # 2. BRIDGE TO GPU
+                self._map = np.asarray(new_map)
             else:
-                self._map = cv2.resize(self._map, (width, height), interpolation=cv2.INTER_AREA)
+                resized = cv2.resize(map_cpu, (width, height), interpolation=cv2.INTER_AREA)
+
+                # 2. BRIDGE TO GPU
+                self._map = np.asarray(resized)
 
             return self
 
@@ -234,9 +251,15 @@ if len(_paths) != 0:
             if scale_y is None:
                 scale_y = scale_x
 
-            new_width = int(self._map.shape[1] * scale_x)
-            new_height = int(self._map.shape[0] * scale_y)
-            self._map = cv2.resize(self._map, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            new_width = int(map_cpu.shape[1] * scale_x)
+            new_height = int(map_cpu.shape[0] * scale_y)
+            scaled = cv2.resize(map_cpu, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+
+            # 2. BRIDGE TO GPU
+            self._map = np.asarray(scaled)
             return self
 
         def fit(self) -> 'Field':
@@ -246,21 +269,26 @@ if len(_paths) != 0:
                 Field: The updated Field object.
             """
             target_value = 0 if self.inverted else 255
-            coords = cv2.findNonZero((self._map == target_value).astype(np.uint8))
+
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            coords = cv2.findNonZero((map_cpu == target_value).astype(np.uint8))
 
             if coords is None:
                 return self
 
             x, y, w, h = cv2.boundingRect(coords)
-            roi = self._map[y:y+h, x:x+w]
-            resized_roi = cv2.resize(roi, (self._map.shape[1], self._map.shape[0]), interpolation=cv2.INTER_LINEAR)
+            roi = map_cpu[y:y+h, x:x+w]
+            resized_roi = cv2.resize(roi, (map_cpu.shape[1], map_cpu.shape[0]), interpolation=cv2.INTER_LINEAR)
 
-            self._map = resized_roi
             if not self.inverted:
-                self._map[self._map != 255] = 0
+                resized_roi[resized_roi != 255] = 0
             else:
-                self._map[self._map != 0] = 255
+                resized_roi[resized_roi != 0] = 255
 
+            # 2. BRIDGE TO GPU
+            self._map = np.asarray(resized_roi)
             return self
 
         def preview(self, wait_for_exit: bool = False, title: str = "Field Preview") -> None:
@@ -271,7 +299,11 @@ if len(_paths) != 0:
                 title (str): Title of the display window.
             """
             window_name = title
-            cv2.imshow(window_name, self._map)
+
+            # 1. BRIDGE TO CPU (Read-only, no need to push back to GPU)
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            cv2.imshow(window_name, map_cpu)
             if wait_for_exit:
                 while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
                     if cv2.waitKey(100) & 0xFF == ord('q'):
@@ -304,7 +336,13 @@ if len(_paths) != 0:
             Returns:
                 Field: The blurred Field object.
             """
-            self._map = cv2.blur(self._map, param)
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            blurred = cv2.blur(map_cpu, param)
+
+            # 2. BRIDGE TO GPU
+            self._map = np.asarray(blurred)
             return self
 
         def mirror_x(self) -> 'Field':
@@ -313,7 +351,9 @@ if len(_paths) != 0:
             Returns:
                 Field: The mirrored Field object.
             """
-            self._map = cv2.flip(self._map, 1)
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+            mirrored = cv2.flip(map_cpu, 1)
+            self._map = np.asarray(mirrored)
             return self
 
         def mirror_y(self) -> 'Field':
@@ -322,7 +362,9 @@ if len(_paths) != 0:
             Returns:
                 Field: The mirrored Field object.
             """
-            self._map = cv2.flip(self._map, 0)
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+            mirrored = cv2.flip(map_cpu, 0)
+            self._map = np.asarray(mirrored)
             return self
 
         def crop(self, top_left: tuple, bottom_right: tuple) -> 'Field':
@@ -655,13 +697,9 @@ if len(_paths) != 0:
             displays a volume indicator based on the RMS volume of the frame.
 
             Parameters:
-                aud (FrameAudio): The FrameAudio object containing the audio data (frequencies and magnitudes).
-                start (int, optional): The starting index of the frequency range to visualize (default is 0).
-                end (int, optional): The ending index of the frequency range to visualize. If None, uses the full range.
-
-            Raises:
-                ValueError: If the start or end indices are invalid.
-                Exception: If an error occurs during the visualization process.
+                aud (FrameAudio): The FrameAudio object containing the audio data.
+                start (int, optional): The starting frequency in Hz (default is 0).
+                end (int, optional): The ending frequency in Hz. If None, uses the full range.
             """
             super().__init__()
 
@@ -669,37 +707,42 @@ if len(_paths) != 0:
                 freqs = aud.list_frequencies()
                 mags = aud.list_magnitudes()
 
-                # Handle start and end indices, adjust for the frequency bin width
+                # Handle start and end indices based on the frequency bin width
+                bin_width_hz = freqs[1] - freqs[0]
+
                 if end is None:
-                    end = len(freqs)
+                    end_idx = len(freqs)
                 else:
-                    end = int(end / (freqs[1] - freqs[0]))  # Convert to index
+                    end_idx = int(end / bin_width_hz)
 
-                start = int(start / (freqs[1] - freqs[0]))  # Convert to index
+                start_idx = int(start / bin_width_hz)
 
-                if end > len(freqs):
-                    end = len(freqs)
-                if start < 0 or start >= len(freqs):
-                    raise ValueError(f"Invalid range: start={start}, end={end}")
+                if end_idx > len(freqs):
+                    end_idx = len(freqs)
+                if start_idx < 0 or start_idx >= len(freqs):
+                    raise ValueError(f"Invalid range: start={start_idx}, end={end_idx}")
 
                 # Normalize the magnitudes for visualization
                 norm = max(mags) / renderer.height()
                 if norm == 0 or np.isnan(norm) or np.isinf(norm):
-                    print(f"Normalization error, mags={mags}")
-                    return
+                    return # Silent frame, leave map blank
 
                 # Create the points for frequency bars
-                total_bars = end - start
+                total_bars = end_idx - start_idx
+                if total_bars <= 0:
+                    return
+
                 bar_width = renderer.width() / total_bars
                 points = []
 
-                for i in range(start, end):
-                    x = i * bar_width + bar_width / 2
-                    y = renderer.height() - mags[i] / norm
+                for i in range(start_idx, end_idx):
+                    # FIX: Subtract start_idx so the first point is always drawn at x=0
+                    x = (i - start_idx) * bar_width + bar_width / 2
+                    y = renderer.height() - (mags[i] / norm)
                     points.extend([x, y])
 
                 # Add the base of the visualization (polygon to close the bars)
-                points.extend([renderer.width() - bar_width, renderer.height(), 0, renderer.height()])
+                points.extend([renderer.width(), renderer.height(), 0, renderer.height()])
                 self.add(FPoly(np.array(points, dtype=np.float32)))
 
                 # Add the volume indicator as a rectangle

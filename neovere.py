@@ -27,13 +27,13 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4", "C:/Users/luke/Videos/snd/taipei/00144.mp4", "C:/Users/luke/Videos/snd/taipei/00145.mp4", "C:/Users/luke/Videos/snd/taipei/00147.mp4", "C:/Users/luke/Videos/snd/taipei/00151.mp4", "C:/Users/luke/Videos/snd/taipei/1000053123.mp4", "C:/Users/luke/Videos/snd/taipei/1000053124.mp4", "C:/Users/luke/Videos/snd/taipei/1000053125.mp4", "C:/Users/luke/Videos/snd/taipei/1000053126.mp4", "C:/Users/luke/Videos/snd/taipei/1000053127.mp4", "C:/Users/luke/Videos/snd/taipei/1000053128.mp4", "C:/Users/luke/Videos/snd/taipei/1000053129.mp4", "C:/Users/luke/Videos/snd/taipei/1000053130.mp4", "C:/Users/luke/Videos/snd/taipei/1000053131.mp4", "C:/Users/luke/Videos/snd/taipei/1000053132.mp4", "C:/Users/luke/Videos/snd/taipei/taipei.mp3", "C:/Users/luke/Videos/snd/taipei/taipeiaudio.mp3", "C:/Users/luke/Videos/snd/taipei/00144map.mp4"]
+_paths = ["render.mp4", "C:/Users/luke/Videos/cloudmap.mp4", "C:/Users/luke/Videos/snd/versailles/versailles_beat.mp3", "C:/Users/luke/Videos/snd/versailles/versailles_vocals.mp3"]
 arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 
 api_key = "" #[%$# #$%]
 gpu_enabled = True
-dx = 0.5
-dt = 1.0
+dx = 0.25
+dt = 0.5
 
 audio_counter = 0
 
@@ -161,6 +161,11 @@ class Frame:
         if pixels.ndim not in (2, 3):
             raise ValueError("Frame must be a 2D (grayscale) or 3D (color) array.")
 
+        # Auto-promote 2D grayscale to 3D RGB
+        if pixels.ndim == 2:
+            # Duplicate the single channel 3 times across the last axis
+            pixels = np.stack([pixels, pixels, pixels], axis=-1)
+
         self._pixels = pixels.astype(np.uint8)
         self._original_pixels = pixels.astype(np.uint8)
         self._height, self._width = self._pixels.shape[:2]
@@ -181,6 +186,8 @@ class Frame:
         """
         with _profile(f"filter:{filter.__class__.__name__}"):
             self._pixels = filter.apply(self.get_pixels().astype(np.uint16)).astype(np.uint8)
+
+        return self
 
     def get_pixels(self, standard_size: bool = False) -> np.ndarray:
         """Return the frame's pixel data as a NumPy array.
@@ -217,6 +224,8 @@ class Frame:
 
         self._pixels = new_flat_pixels.reshape(height, width, 3).astype(np.uint8)
 
+        return self
+
     def resize(self, w: int, h: int) -> None:
         """Resize the frame to a new width and height.
 
@@ -224,9 +233,19 @@ class Frame:
             w (int): The target width.
             h (int): The target height.
         """
-        self._pixels = cv2.resize(self._original_pixels, (w, h))
+        # 1. BRIDGE TO CPU
+        pixels_cpu = self._original_pixels.get() if hasattr(self._original_pixels, 'get') else self._original_pixels
+
+        # 2. PERFORM ON CPU
+        resized = cv2.resize(pixels_cpu, (w, h))
+
+        # 3. BRIDGE TO GPU (if enabled)
+        self._pixels = np.asarray(resized)
+
         self._width = w
         self._height = h
+
+        return self
 
     def set_width(self, w: int) -> None:
         """Set a new width for the frame while keeping the current height.
@@ -261,17 +280,14 @@ class Frame:
         return self._height
 
     def preview(self, wait_for_exit: bool = False, title: str = "Frame Preview") -> None:
-        """Display the frame in a window for previewing.
-
-        Parameters:
-            wait_for_exit (bool): If True, waits until the user closes the window or presses 'q' key.
-            title (str): The window title for the preview.
-        """
+        """Display the frame in a window for previewing."""
         window_name = title
-        if gpu_enabled:
-            cv2.imshow(window_name, np.asnumpy(self._pixels))
-        else:
-            cv2.imshow(window_name, self._pixels)
+
+        # Safely extract to CPU without relying on np.asnumpy
+        pixels_cpu = self._pixels.get() if hasattr(self._pixels, 'get') else self._pixels
+
+        cv2.imshow(window_name, pixels_cpu)
+
         if wait_for_exit:
             while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
                 if cv2.waitKey(100) & 0xFF == ord('q'):
@@ -295,6 +311,8 @@ class Frame:
 
         self._pixels = self._pixels[y1:y2, x1:x2]
         self._height, self._width = self._pixels.shape[:2]
+
+        return self
 
 
 class Color_Frame(Frame):
@@ -539,12 +557,17 @@ class Video:
             else:
                 # Raw cache holds shared arrays; copy to protect from in-place filter mutation
                 frame = cached.copy()
-            if gpu_enabled:
-                frame = np.asarray(frame)
+
+            # 1. ALWAYS perform OpenCV resizing on the CPU first
             if h is None and w != 1.0:
                 frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
             elif h is not None:
                 frame = cv2.resize(frame, (w, h))
+
+            # 2. THEN push the final sized frame to the GPU
+            if gpu_enabled:
+                frame = np.asarray(frame)
+
             return Frame(frame)
 
         # Map scaled (preview) index to source index
@@ -554,8 +577,6 @@ class Video:
             source_idx = frame_index
 
         # For small forward jumps, sequential read+discard is faster than seek+decode
-        # because seek pays a full keyframe-decode cost. For backward or large forward
-        # jumps, fall back to seek which is faster than re-reading huge ranges.
         SEEK_THRESHOLD = 60
         delta = source_idx - self.__current_source_pos
         if 0 <= delta <= SEEK_THRESHOLD:
@@ -566,16 +587,22 @@ class Video:
             self.__video.set(cv2.CAP_PROP_POS_FRAMES, source_idx)
             ret, frame = self.__video.read()
         self.__current_source_pos = source_idx + 1
+
         if ret:
-            if gpu_enabled:
-                frame = np.asarray(frame)
             # Always ensure the loaded frame strictly matches the expected dimensions
             if frame.shape[1] != self.__width or frame.shape[0] != self.__height:
                 frame = cv2.resize(frame, (self.__width, self.__height))
+
+            # 1. ALWAYS perform OpenCV resizing on the CPU first
             if h is None and w != 1.0:
                 frame = cv2.resize(frame, (0, 0), fx=w, fy=w)
             elif h is not None:
                 frame = cv2.resize(frame, (w, h))
+
+            # 2. THEN push the final sized frame to the GPU
+            if gpu_enabled:
+                frame = np.asarray(frame)
+
             return Frame(frame)
         else:
             raise ValueError(f"Frame {frame_index} could not be read. The video may be closed.")
@@ -831,20 +858,16 @@ class Audio:
                 encoded += f"_{ord(char)}_"
         return encoded
 
-    def preload_data(self, reload: bool = False) -> None:
+    def preload_data(self, reload: bool = False, padding_factor: int = 1) -> None:
         """Preload and process audio into per-frame features (volume, spectrum) for faster access.
 
         Parameters:
             reload (bool): Whether to force reloading even if cached data exists.
+            padding_factor (int): Multiplier for FFT zero-padding to increase frequency resolution. Default is 1 (no padding).
         """
-        # AudioCache/ may not exist yet on first run in a fresh workspace
-        # (e.g. ~/Documents/Neovere/ created by the packaged .app on first launch).
-        # Without this, rnp.save() below fails with FileNotFoundError and the
-        # exception propagates to setVideo.py's bare `except`, which silently
-        # swallows it — leaving self._loaded == False so subsequent frame_audio
-        # calls raise "Audio data not preloaded".
         os.makedirs("AudioCache", exist_ok=True)
-        cache_file = f"AudioCache/{self._encode_cache_name(self._file_path)}.npy"
+
+        cache_file = f"AudioCache/{self._encode_cache_name(self._file_path)}_pad{padding_factor}.npy"
 
         if os.path.isfile(cache_file) and not reload:
             full_audio_data = rnp.load(cache_file, allow_pickle=True)
@@ -874,8 +897,12 @@ class Audio:
                     break
 
                 volume = np.sqrt(np.mean(frame_audio ** 2))
-                yf = fft(frame_audio)
-                xf = fftfreq(len(frame_audio), 1 / self._sample_rate)
+
+                # 💥 NEW: Apply the dynamic padding factor to the math
+                fft_size = len(frame_audio) * padding_factor
+
+                yf = fft(frame_audio, n=fft_size)
+                xf = fftfreq(fft_size, 1 / self._sample_rate)
 
                 positive_frequencies = xf[:len(yf) // 2]
                 magnitude = rnp.abs(yf[:len(yf) // 2])
@@ -891,10 +918,6 @@ class Audio:
                 "sample rate": self._sample_rate
             })
             rnp.save(cache_file, self._audio_data)
-            # Strip the metadata trailer back off so the in-memory layout matches
-            # the cache-hit branch above (which does full_audio_data[:-1]).
-            # Without this, frame_audio(N-1) returns the metadata dict and blows
-            # up with KeyError('frequencies').
             self._audio_data = self._audio_data[:-1]
 
         self._loaded = True
@@ -983,8 +1006,11 @@ class ImageFile:
         if raw_image is None:
             raise ValueError(f"Could not load image file: {file_path}")
 
-        # If the image has an alpha channel (4 channels), blend it over a black background
-        # so it safely converts to the standard 3-channel BGR format the engine expects
+        # 💥 THE FIX: Safely scale 16-bit Blender exports down to 8-bit BEFORE any math!
+        if raw_image.dtype == np.uint16:
+            raw_image = (raw_image / 256).astype(np.uint8)
+
+        # Now, the image is guaranteed to be 8-bit. The alpha math will work perfectly.
         if raw_image.shape[2] == 4:
             alpha = raw_image[:, :, 3] / 255.0
             bgr = raw_image[:, :, :3]
@@ -1374,10 +1400,10 @@ class NonlinearRenderer:
                 self.__fps,
                 (self.__width, self.__height)
             )
-            unordered_render = cv2.VideoCapture("unordered_render.mp4")
+            frame_map = {logical_idx: write_idx for write_idx, logical_idx in enumerate(self.__frame_indices)}
 
             for frame_index in range(self.__max_frame_index + 1):
-                unordered_idx = self.__get_unordered_frame_idx(frame_index)
+                unordered_idx = frame_map.get(frame_index, -1)
                 if unordered_idx == -1:
                     blank_frame = cv2.UMat(self.__height, self.__width, cv2.CV_8UC3, [0, 0, 0])
                     ordered_writer.write(blank_frame)
@@ -1459,10 +1485,21 @@ class NonlinearRenderer:
                 print("<<<NEO_AUDIO_READY>>>", flush=True)
                 print("Preview compiled as preview.mp4 (with audio)")
             else:
+                import time # Ensure time is available
                 # No audio attached this render — invalidate the cache so phase 1 falls
                 # back to silent next time.
                 if os.path.exists("cached_preview_audio.aac"):
-                    os.remove("cached_preview_audio.aac")
+                    # Give the Qt App up to 1.5 seconds to drop the file handle
+                    for _attempt in range(30):
+                        try:
+                            os.remove("cached_preview_audio.aac")
+                            break # Success!
+                        except PermissionError:
+                            time.sleep(0.05)
+                    else:
+                        # Soft-fail: If Qt stubbornly holds it, don't crash the whole script!
+                        print("[Warning] Qt is still holding the audio cache. Will overwrite next time.")
+
                 print("Preview compiled as preview.mp4 (silent)")
         elif self.__audios:
             with _profile("renderer.attach_audios"):
@@ -1729,6 +1766,256 @@ class Bot:
                 i += 1
         return timestamps
 
+class Audio_Analyzer:
+    """A suite of tools for advanced audio frequency and transient analysis."""
+
+    @staticmethod
+    def get_range_mag(freqs: rnp.ndarray, mags: rnp.ndarray, start_hz: float, end_hz: float) -> float:
+        """
+        Calculates the energy of a specific frequency band relative to the 
+        total energy of the entire audio frame.
+        Returns a value from 0.0 (silent) to 1.0 (all audio energy is in this band).
+        """
+        # Guard against completely silent frames to prevent divide-by-zero
+        total_mag = float(rnp.sum(mags))
+        if total_mag <= 0.0001:
+            return 0.0
+
+        bin_width = freqs[1] - freqs[0]
+        
+        # Convert Hz boundaries to array indices safely
+        start_idx = max(0, int(start_hz / bin_width))
+        end_idx = min(int(end_hz / bin_width), len(freqs))
+        
+        # Guard against reversed or invalid ranges
+        if start_idx >= end_idx:
+            return 0.0
+            
+        segment_mags = mags[start_idx:end_idx]
+        
+        # Sum the energy in our target band
+        segment_mag_sum = float(rnp.sum(segment_mags))
+        
+        # Return the ratio (0.0 to 1.0)
+        return min(1.0, segment_mag_sum / total_mag)
+        
+    @staticmethod
+    def calculate_bloom(freqs: rnp.ndarray, mags: rnp.ndarray, peak_global_idx: int, window_hz: float = 40.0) -> float:
+        """
+        Calculates the transient splash relative to the peak magnitude.
+        Returns a value from 0.0 (pure tone) to 1.0 (maximum noisy splash).
+        """
+        peak_freq = freqs[peak_global_idx]
+        peak_mag = mags[peak_global_idx]
+        
+        # Silence guard: If the main note is basically dead, there is no bloom.
+        if peak_mag <= 0.0001:
+            return 0.0
+
+        bin_width = freqs[1] - freqs[0]
+        bin_range = int(window_hz / bin_width)
+        
+        start_i = max(0, peak_global_idx - bin_range)
+        end_i = min(len(freqs), peak_global_idx + bin_range + 1)
+        
+        neighborhood_freqs = freqs[start_i:end_i]
+        neighborhood_mags = mags[start_i:end_i]
+        
+        weights = 1.0 - (rnp.abs(neighborhood_freqs - peak_freq) / window_hz)
+        weights = rnp.clip(weights, 0.0, 1.0)
+        
+        local_peak_idx = peak_global_idx - start_i
+        weights[local_peak_idx] = 0.0
+        
+        # 1. Calculate actual splash
+        raw_bloom = float(rnp.sum(neighborhood_mags * weights))
+        
+        # 2. Calculate maximum possible splash (if all neighbors were as loud as the peak)
+        max_possible_bloom = float(peak_mag * rnp.sum(weights))
+        
+        if max_possible_bloom <= 0:
+            return 0.0
+            
+        # 3. Return the ratio
+        return min(1.0, raw_bloom / max_possible_bloom)
+        
+    @staticmethod
+    def get_peak_data(freqs: rnp.ndarray, mags: rnp.ndarray, start_hz: float, end_hz: float) -> tuple[float, int]:
+        """
+        Finds the loudest frequency within a range.
+        Returns a tuple containing:
+        1. peak_norm: The normalized position of the peak (0.0 to 1.0) between start_hz and end_hz.
+        2. global_peak_idx: The exact array index of the peak (useful for the bloom calculator).
+        """
+        bin_width = freqs[1] - freqs[0]
+        
+        # Convert Hz to array indices
+        start_idx = max(0, int(start_hz / bin_width))
+        end_idx = min(int(end_hz / bin_width), len(freqs))
+
+        segment_mags = mags[start_idx:end_idx]
+        
+        # Guard against silent or empty segments
+        if len(segment_mags) == 0 or rnp.max(segment_mags) <= 0.0001:
+            return 0.0, 0
+            
+        # Find the peak within the slice, then calculate its global position
+        max_idx = int(segment_mags.argmax())
+        global_peak_idx = start_idx + max_idx
+        peak_freq = freqs[global_peak_idx]
+        
+        # Normalize the peak's position (0.0 is start_hz, 1.0 is end_hz)
+        # Note: Your original code used 350 here. This uses the true range (end_hz - start_hz).
+        normalization_range = end_hz - start_hz
+        peak_norm = float(rnp.clip((peak_freq - start_hz) / normalization_range, 0.0, 1.0))
+        
+        return peak_norm, global_peak_idx
+    
+    @staticmethod
+    def get_mean_frequency(freqs: rnp.ndarray, mags: rnp.ndarray, start_hz: float, end_hz: float) -> tuple[float, float]:
+        """
+        Calculates the mean frequency (spectral centroid) within a specific range.
+        Returns a tuple containing:
+        1. mean_norm: The normalized position of the mean frequency (0.0 to 1.0) between start_hz and end_hz.
+        2. exact_freq: The exact calculated mean frequency in Hz.
+        """
+        bin_width = freqs[1] - freqs[0]
+        
+        # Convert Hz to array indices safely
+        start_idx = max(0, int(start_hz / bin_width))
+        end_idx = min(int(end_hz / bin_width), len(freqs))
+
+        segment_freqs = freqs[start_idx:end_idx]
+        segment_mags = mags[start_idx:end_idx]
+        
+        # Guard against silent or empty segments to prevent division by zero
+        total_mag = float(rnp.sum(segment_mags))
+        if len(segment_mags) == 0 or total_mag <= 0.0001:
+            return 0.0, float(start_hz)
+            
+        # Calculate the spectral centroid (weighted average of frequencies)
+        # Formula: Sum(Frequency * Magnitude) / Sum(Magnitude)
+        mean_freq = float(rnp.sum(segment_freqs * segment_mags) / total_mag)
+        
+        # Normalize the mean frequency's position (0.0 is start_hz, 1.0 is end_hz)
+        normalization_range = end_hz - start_hz
+        if normalization_range <= 0:
+             return 0.0, float(start_hz)
+             
+        mean_norm = float(rnp.clip((mean_freq - start_hz) / normalization_range, 0.0, 1.0))
+        
+        return mean_norm, mean_freq
+        
+    @staticmethod
+    def draw_visualizer(frame, frame_audio, x_range: tuple = (0.0, 0.5), y_range: tuple = (0.5, 1.0), freq_range: tuple = None, color: tuple = (255, 0, 0)):
+        """
+        Draws an audio visualizer graph directly onto the provided frame.
+        x_range and y_range map the placement via normalized coordinates (0.0 to 1.0).
+        """
+        # Safely extract the dimensions of the current frame (works for both CPU and GPU arrays)
+        pixels = frame.get_pixels(standard_size=True)
+        h, w = pixels.shape[:2]
+
+        # Calculate exact pixel sizes and positions based on the float ranges
+        vis_width = w * (x_range[1] - x_range[0])
+        vis_height = h * (y_range[1] - y_range[0])
+        vis_x = w * x_range[0]
+        vis_y = h * y_range[0]
+
+        # Initialize the visualizer field with or without specific frequency bounds
+        if freq_range is not None:
+            audio_vis_field = FAudio(frame_audio, start=freq_range[0], end=freq_range[1])
+        else:
+            audio_vis_field = FAudio(frame_audio)
+
+        # 1. Scale the graph down to the target box size
+        audio_vis_field.scale(vis_width / w, vis_height / h)
+        
+        # 2. Expand its virtual bounding box back to full screen so it doesn't clip
+        audio_vis_field.resize(w, h)
+        
+        # 3. Move it into the exact calculated screen coordinates
+        audio_vis_field.move(int(vis_x), int(vis_y))
+
+        # Unpack the color tuple into the filter and apply it to the frame
+        frame.apply_filter(Solid_Color(color[0], color[1], color[2]).set_field(audio_vis_field))
+
+        return frame
+
+class Color_Picker:
+    @staticmethod
+    def average_color(frame: Frame, points: list[tuple[int, int]]) -> tuple[int, int, int]:
+        """Calculate the average color within specified (x, y) points in the frame.
+
+        Parameters:
+            frame (Frame): The Frame object to sample colors from.
+            points (List[Tuple[int, int]]): A list of (x, y) tuples representing pixel coordinates.
+
+        Returns:
+            Tuple[int, int, int]: The average color as an (R, G, B) tuple.
+
+        Raises:
+            ValueError: If points list is empty or contains out-of-bounds coordinates.
+        """
+        if not points:
+            raise ValueError("Points list cannot be empty.")
+
+        pixels = frame.get_pixels(standard_size=True)
+        height, width = pixels.shape[:2]
+
+        sum_r = 0
+        sum_g = 0
+        sum_b = 0
+        count = 0
+
+        for x, y in points:
+            if 0 <= x < width and 0 <= y < height:
+                b, g, r = pixels[y, x]
+                sum_r += int(r)
+                sum_g += int(g)
+                sum_b += int(b)
+                count += 1
+            else:
+                raise ValueError(f"Point {(x, y)} is out of frame bounds ({width}, {height}).")
+
+        if count == 0:
+            raise ValueError("No valid points found within frame bounds.")
+
+        avg_r = sum_r // count
+        avg_g = sum_g // count
+        avg_b = sum_b // count
+
+        return (avg_r, avg_g, avg_b)
+
+class Media_Optimizer:
+    @staticmethod
+    def downscale_image(input_path: str, output_path: str, scale: float) -> bool:
+        """
+        Reads an image, downscales it by a float multiplier, and saves it.
+        
+        :param input_path: Path to the original image.
+        :param output_path: Path to save the downscaled image.
+        :param scale: Float multiplier (e.g., 0.5 for half size, 0.25 for quarter size).
+        :return: True if successful, False if the image couldn't be read.
+        """
+        # 1. Load the original image
+        img = cv2.imread(input_path)
+        
+        if img is None:
+            print(f"Error: Could not read image at {input_path}")
+            return False
+            
+        # 2. Calculate the exact new pixel dimensions
+        new_width = int(img.shape[1] * scale)
+        new_height = int(img.shape[0] * scale)
+        
+        # 3. Resize using INTER_AREA (best for crushing pixels down)
+        resized_img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        
+        # 4. Save to the new path
+        cv2.imwrite(output_path, resized_img)
+        return True
+
 def read_font_from_qt_resource(resource_path):
     file = QFile(resource_path)
     if not file.open(QFile.ReadOnly):
@@ -1967,12 +2254,18 @@ if len(_paths) != 0:
             if width >= 32000 or height >= 32000:
                 raise ValueError("Image too large for OpenCV warpAffine.")
 
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
             translation_matrix = np.float32([[1, 0, dx], [0, 1, dy]])
-            self._map = cv2.warpAffine(
-                self._map, translation_matrix, (width, height),
+            moved = cv2.warpAffine(
+                map_cpu, translation_matrix, (width, height),
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=255 if self.inverted else 0
             )
+
+            # 2. BRIDGE TO GPU
+            self._map = np.asarray(moved)
             return self
 
         def resize(self, width_or_scale: int or float, height: int = None) -> 'Field':
@@ -1995,14 +2288,25 @@ if len(_paths) != 0:
 
             fill_value = 255 if self.inverted else 0
 
-            if width > self._map.shape[1] or height > self._map.shape[0]:
-                new_map = np.full((height, width), fill_value, dtype=np.uint8)
-                overlap_x_end = min(self._map.shape[1], width)
-                overlap_y_end = min(self._map.shape[0], height)
-                new_map[:overlap_y_end, :overlap_x_end] = self._map[:overlap_y_end, :overlap_x_end]
-                self._map = new_map
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            if width > map_cpu.shape[1] or height > map_cpu.shape[0]:
+                # FIX: Explicitly import standard numpy locally to bypass any global CuPy aliases
+                import numpy as standard_np
+                new_map = standard_np.full((height, width), fill_value, dtype=standard_np.uint8)
+
+                overlap_x_end = min(map_cpu.shape[1], width)
+                overlap_y_end = min(map_cpu.shape[0], height)
+                new_map[:overlap_y_end, :overlap_x_end] = map_cpu[:overlap_y_end, :overlap_x_end]
+
+                # 2. BRIDGE TO GPU
+                self._map = np.asarray(new_map)
             else:
-                self._map = cv2.resize(self._map, (width, height), interpolation=cv2.INTER_AREA)
+                resized = cv2.resize(map_cpu, (width, height), interpolation=cv2.INTER_AREA)
+
+                # 2. BRIDGE TO GPU
+                self._map = np.asarray(resized)
 
             return self
 
@@ -2025,9 +2329,15 @@ if len(_paths) != 0:
             if scale_y is None:
                 scale_y = scale_x
 
-            new_width = int(self._map.shape[1] * scale_x)
-            new_height = int(self._map.shape[0] * scale_y)
-            self._map = cv2.resize(self._map, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            new_width = int(map_cpu.shape[1] * scale_x)
+            new_height = int(map_cpu.shape[0] * scale_y)
+            scaled = cv2.resize(map_cpu, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+
+            # 2. BRIDGE TO GPU
+            self._map = np.asarray(scaled)
             return self
 
         def fit(self) -> 'Field':
@@ -2037,21 +2347,26 @@ if len(_paths) != 0:
                 Field: The updated Field object.
             """
             target_value = 0 if self.inverted else 255
-            coords = cv2.findNonZero((self._map == target_value).astype(np.uint8))
+
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            coords = cv2.findNonZero((map_cpu == target_value).astype(np.uint8))
 
             if coords is None:
                 return self
 
             x, y, w, h = cv2.boundingRect(coords)
-            roi = self._map[y:y+h, x:x+w]
-            resized_roi = cv2.resize(roi, (self._map.shape[1], self._map.shape[0]), interpolation=cv2.INTER_LINEAR)
+            roi = map_cpu[y:y+h, x:x+w]
+            resized_roi = cv2.resize(roi, (map_cpu.shape[1], map_cpu.shape[0]), interpolation=cv2.INTER_LINEAR)
 
-            self._map = resized_roi
             if not self.inverted:
-                self._map[self._map != 255] = 0
+                resized_roi[resized_roi != 255] = 0
             else:
-                self._map[self._map != 0] = 255
+                resized_roi[resized_roi != 0] = 255
 
+            # 2. BRIDGE TO GPU
+            self._map = np.asarray(resized_roi)
             return self
 
         def preview(self, wait_for_exit: bool = False, title: str = "Field Preview") -> None:
@@ -2062,7 +2377,11 @@ if len(_paths) != 0:
                 title (str): Title of the display window.
             """
             window_name = title
-            cv2.imshow(window_name, self._map)
+
+            # 1. BRIDGE TO CPU (Read-only, no need to push back to GPU)
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            cv2.imshow(window_name, map_cpu)
             if wait_for_exit:
                 while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
                     if cv2.waitKey(100) & 0xFF == ord('q'):
@@ -2095,7 +2414,13 @@ if len(_paths) != 0:
             Returns:
                 Field: The blurred Field object.
             """
-            self._map = cv2.blur(self._map, param)
+            # 1. BRIDGE TO CPU
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+
+            blurred = cv2.blur(map_cpu, param)
+
+            # 2. BRIDGE TO GPU
+            self._map = np.asarray(blurred)
             return self
 
         def mirror_x(self) -> 'Field':
@@ -2104,7 +2429,9 @@ if len(_paths) != 0:
             Returns:
                 Field: The mirrored Field object.
             """
-            self._map = cv2.flip(self._map, 1)
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+            mirrored = cv2.flip(map_cpu, 1)
+            self._map = np.asarray(mirrored)
             return self
 
         def mirror_y(self) -> 'Field':
@@ -2113,7 +2440,9 @@ if len(_paths) != 0:
             Returns:
                 Field: The mirrored Field object.
             """
-            self._map = cv2.flip(self._map, 0)
+            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+            mirrored = cv2.flip(map_cpu, 0)
+            self._map = np.asarray(mirrored)
             return self
 
         def crop(self, top_left: tuple, bottom_right: tuple) -> 'Field':
@@ -2446,13 +2775,9 @@ if len(_paths) != 0:
             displays a volume indicator based on the RMS volume of the frame.
 
             Parameters:
-                aud (FrameAudio): The FrameAudio object containing the audio data (frequencies and magnitudes).
-                start (int, optional): The starting index of the frequency range to visualize (default is 0).
-                end (int, optional): The ending index of the frequency range to visualize. If None, uses the full range.
-
-            Raises:
-                ValueError: If the start or end indices are invalid.
-                Exception: If an error occurs during the visualization process.
+                aud (FrameAudio): The FrameAudio object containing the audio data.
+                start (int, optional): The starting frequency in Hz (default is 0).
+                end (int, optional): The ending frequency in Hz. If None, uses the full range.
             """
             super().__init__()
 
@@ -2460,37 +2785,42 @@ if len(_paths) != 0:
                 freqs = aud.list_frequencies()
                 mags = aud.list_magnitudes()
 
-                # Handle start and end indices, adjust for the frequency bin width
+                # Handle start and end indices based on the frequency bin width
+                bin_width_hz = freqs[1] - freqs[0]
+
                 if end is None:
-                    end = len(freqs)
+                    end_idx = len(freqs)
                 else:
-                    end = int(end / (freqs[1] - freqs[0]))  # Convert to index
+                    end_idx = int(end / bin_width_hz)
 
-                start = int(start / (freqs[1] - freqs[0]))  # Convert to index
+                start_idx = int(start / bin_width_hz)
 
-                if end > len(freqs):
-                    end = len(freqs)
-                if start < 0 or start >= len(freqs):
-                    raise ValueError(f"Invalid range: start={start}, end={end}")
+                if end_idx > len(freqs):
+                    end_idx = len(freqs)
+                if start_idx < 0 or start_idx >= len(freqs):
+                    raise ValueError(f"Invalid range: start={start_idx}, end={end_idx}")
 
                 # Normalize the magnitudes for visualization
                 norm = max(mags) / renderer.height()
                 if norm == 0 or np.isnan(norm) or np.isinf(norm):
-                    print(f"Normalization error, mags={mags}")
-                    return
+                    return # Silent frame, leave map blank
 
                 # Create the points for frequency bars
-                total_bars = end - start
+                total_bars = end_idx - start_idx
+                if total_bars <= 0:
+                    return
+
                 bar_width = renderer.width() / total_bars
                 points = []
 
-                for i in range(start, end):
-                    x = i * bar_width + bar_width / 2
-                    y = renderer.height() - mags[i] / norm
+                for i in range(start_idx, end_idx):
+                    # FIX: Subtract start_idx so the first point is always drawn at x=0
+                    x = (i - start_idx) * bar_width + bar_width / 2
+                    y = renderer.height() - (mags[i] / norm)
                     points.extend([x, y])
 
                 # Add the base of the visualization (polygon to close the bars)
-                points.extend([renderer.width() - bar_width, renderer.height(), 0, renderer.height()])
+                points.extend([renderer.width(), renderer.height(), 0, renderer.height()])
                 self.add(FPoly(np.array(points, dtype=np.float32)))
 
                 # Add the volume indicator as a rectangle
@@ -2507,6 +2837,40 @@ if len(_paths) != 0:
                 print(f"Unexpected error initializing FAudio: {e}")
 
 
+
+class FDepth_Slice(Field):
+        def __init__(self, depth_frame: 'Frame', feather: float, lower_bound: float, upper_bound: float) -> None:
+            """Initialize a field from a depth map using a feathered slice between two thresholds.
+            
+            Parameters:
+                depth_frame: The frame containing the depth map.
+                feather: The width of the smooth transition zone on both edges.
+                lower_bound: The minimum luminance to keep (0.0 to 1.0).
+                upper_bound: The maximum luminance to keep (0.0 to 1.0).
+            """
+            super().__init__()
+            
+            # Extract normalized pixels
+            pixels = depth_frame.get_pixels(standard_size=True).astype(np.float32) / 255.0
+            
+            # Compute luminance as a grayscale mask
+            luminance = 0.299 * pixels[:, :, 2] + 0.587 * pixels[:, :, 1] + 0.114 * pixels[:, :, 0]
+            
+            # Feathering math
+            if feather > 0.0:
+                # 1. Fade-in mask (ramp from 0.0 to 1.0 around the lower bound)
+                lower_fade = np.clip((luminance - (lower_bound - feather)) / (2 * feather), 0.0, 1.0)
+                
+                # 2. Fade-out mask (ramp from 1.0 to 0.0 around the upper bound)
+                upper_fade = 1.0 - np.clip((luminance - (upper_bound - feather)) / (2 * feather), 0.0, 1.0)
+                
+                # 3. Multiply them to extract the perfectly feathered slice
+                mask = lower_fade * upper_fade
+            else:
+                # Hard cut if no feather is applied
+                mask = ((luminance > lower_bound) & (luminance < upper_bound)).astype(np.float32)
+                
+            self._map = (mask * 255).astype(np.uint8)
 
 if len(_paths) != 0:
     class Filter:
@@ -2546,14 +2910,32 @@ if len(_paths) != 0:
             render_height = renderer.height()
             render_width = renderer.width()
 
+            # Fast path: If the map is already perfectly sized, use it instantly
+            if full_map.shape[0] == render_height and full_map.shape[1] == render_width:
+                self._map = full_map
+                return self
+
+            # Otherwise, force it to renderer dimensions to prevent broadcasting crashes
+            target_map = np.zeros((render_height, render_width, 1), dtype=np.float32)
+
             orig_height, orig_width = full_map.shape[:2]
 
-            start_y = max((orig_height - render_height) // 2, 0)
-            start_x = max((orig_width - render_width) // 2, 0)
-            end_y = start_y + min(render_height, orig_height)
-            end_x = start_x + min(render_width, orig_width)
+            start_y = max((render_height - orig_height) // 2, 0)
+            start_x = max((render_width - orig_width) // 2, 0)
 
-            self._map = full_map[start_y:end_y, start_x:end_x]
+            copy_h = min(render_height, orig_height)
+            copy_w = min(render_width, orig_width)
+
+            src_start_y = max((orig_height - render_height) // 2, 0)
+            src_start_x = max((orig_width - render_width) // 2, 0)
+
+            # BRIDGE: Safely extract to CPU if it's on the GPU
+            full_map_cpu = full_map.get() if hasattr(full_map, 'get') else full_map
+
+            target_map[start_y:start_y+copy_h, start_x:start_x+copy_w] = full_map_cpu[src_start_y:src_start_y+copy_h, src_start_x:src_start_x+copy_w]
+
+            # Push back to active hardware
+            self._map = np.asarray(target_map)
 
             return self
 
