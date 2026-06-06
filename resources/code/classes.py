@@ -98,7 +98,12 @@ class Frame:
             filter: A filter to apply to the frame
         """
         with _profile(f"filter:{filter.__class__.__name__}"):
-            self._pixels = filter.apply(self.get_pixels().astype(np.uint16)).astype(np.uint8)
+            # Prefer apply_to (resolves the field mask at the frame's exact
+            # resolution); fall back to apply for legacy/custom filters.
+            runner = getattr(filter, "apply_to", None)
+            if runner is None:
+                runner = filter.apply
+            self._pixels = runner(self.get_pixels().astype(np.uint16)).astype(np.uint8)
 
         return self
 
@@ -1027,6 +1032,19 @@ class NonlinearRenderer:
         self.__fb_failed = False         # if buffer alloc failed, fall back to video file
         self.__fb_actual_frames = 0      # number of frames the user actually wrote
 
+        # -- 'standard' template state (setup/render projects driven by run()) --
+        # A standard project precomputes state in setup() and renders individual
+        # frames on demand via render(f). The engine keeps the registered render
+        # callback alive (its __globals__ holds the user's namespace) so frames
+        # can be produced one at a time without rebuilding the whole video.
+        self.__duration = 0              # timeline length in frames (set_duration)
+        self.__std_setup = None          # the user's setup() callable
+        self.__std_render = None         # the user's render(f) callable
+        self.__std_setup_key = None      # source hash of the last setup() we ran
+        self.__std_registered = False    # True once run() registered this dispatch
+        self.__std_request_frame = 0     # frame to render for the initial publish
+        self.__std_has_audio = False     # True if setup() attached audio this session
+
     def set_use_frame_buffer(self, enabled: bool) -> None:
         """When enabled, set_frame() also writes frames to a shared-memory buffer
         for the C++ side to display directly (skipping the video file decode path).
@@ -1141,6 +1159,35 @@ class NonlinearRenderer:
         except Exception as e:
             print(f"[fb] header write failed: {e}")
 
+    def _fb_publish_single(self, frame_index: int, write_pixels) -> None:
+        """Publish ONE frame to the shared buffer for on-demand (standard) playback.
+
+        Unlike set_frame()'s accumulation, this always writes to slot 0 and
+        reports frame_count=1: the C++ side displays "the latest frame" and uses
+        the timeline duration (set_duration) for the scrubber, not the buffer's
+        frame_count. Bumps the generation and prints a per-frame sentinel so the
+        viewport knows which logical frame just became available.
+
+        write_pixels must be HxWx3 uint8 in cv2's BGR order (as get_pixels(True)
+        returns); the buffer stores RGB, so we swap channels on write.
+        """
+        if self.__fb_mm is None:
+            if not self._fb_allocate():
+                self.__fb_failed = True
+                return
+        if self.__fb_mm is None:
+            return
+        # cv2 gives BGR, the buffer holds RGB. Convert with a fast slice swap.
+        self.__fb_mm[0] = write_pixels[:, :, ::-1]
+        try:
+            self.__fb_mm.flush()
+        except Exception:
+            pass
+        self.__fb_actual_frames = 1
+        self.__fb_generation += 1
+        self._fb_write_header(1)
+        print(f"<<<NEO_FRAME {int(frame_index)} {self.__fb_generation}>>>", flush=True)
+
     def set_frame(self, frame_index: int, new_frame: 'Frame') -> None:
         """Set a frame at a specific index for the output video.
 
@@ -1199,7 +1246,14 @@ class NonlinearRenderer:
 
         Raises:
             ValueError: If the volume is not between 0.0 and 1.0.
+
+        Notes:
+            Passing audio=None is a no-op. This lets standard projects call
+            renderer.attach_audio(video.audio) in setup() without checking whether
+            the source clip actually has an audio track.
         """
+        if audio is None:
+            return
         if not 0.0 <= volume <= 1.0:
             raise ValueError("Volume must be between 0.0 and 1.0.")
         self.__audios.append((audio, volume))
@@ -1242,6 +1296,23 @@ class NonlinearRenderer:
         """
         return self.__fps
 
+    def set_duration(self, frames: int) -> None:
+        """Set the timeline length, in frames, for a 'standard' project.
+
+        Standard projects render frames on demand (one at a time) rather than
+        building the whole video up front, so the engine needs to be told how
+        many frames the timeline spans. Used to clamp render(f) requests and to
+        drive the playback scrubber / export range.
+
+        Parameters:
+            frames (int): Total number of frames in the timeline.
+        """
+        self.__duration = max(0, int(frames))
+
+    def duration(self) -> int:
+        """Get the timeline length in frames (see set_duration)."""
+        return self.__duration
+
     def width(self) -> int:
         """Get the current video width.
 
@@ -1276,6 +1347,207 @@ class NonlinearRenderer:
             return int(seconds * self.fps())
         else:
             raise TypeError("Expected an int, float, or list of floats.")
+
+    # ------------------------------------------------------------------ #
+    #  'standard' template support (setup/render projects via run())      #
+    # ------------------------------------------------------------------ #
+
+    def _begin_dispatch(self, fresh_namespace: bool = False) -> None:
+        """Called by the worker before (re-)executing a user script.
+
+        Clears the standard-mode registration so we can detect whether the NEW
+        script calls run(). When the worker had to start a fresh namespace
+        (e.g. the previous project was legacy), it passes fresh_namespace=True
+        and we also forget the last setup() hash, forcing setup() to run again
+        so its precomputed globals are repopulated in the new namespace.
+        """
+        self.__std_registered = False
+        self.__std_render = None
+        self.__std_setup = None
+        if fresh_namespace:
+            self.__std_setup_key = None
+
+    def _set_request_frame(self, frame_index: int) -> None:
+        """Set which frame run() should render for its initial publish."""
+        self.__std_request_frame = max(0, int(frame_index))
+
+    def is_standard(self) -> bool:
+        """True if the most recently executed script registered a render via run()."""
+        return self.__std_registered
+
+    def _run_standard(self, setup, render) -> None:
+        """Engine entry point for 'standard' projects (called by the module-level
+        run(setup, render)). Runs setup() once — and again only when its source
+        changes — then publishes the initial frame and signals readiness. Returns
+        immediately; subsequent frames are produced on demand by _render_one().
+        """
+        if not callable(render):
+            raise TypeError("run(setup, render): render must be a callable taking one argument (the frame index).")
+        self.__std_render = render
+        self.__std_setup = setup
+        self.__std_registered = True
+
+        # Run setup() only when its source changed since the last run, so that
+        # render-only edits keep the precomputed globals alive (the worker reuses
+        # the namespace). If we can't read the source, run it every time.
+        run_setup = True
+        if setup is not None:
+            try:
+                import inspect, hashlib
+                src = inspect.getsource(setup)
+                key = hashlib.sha1(src.encode("utf-8")).hexdigest()
+                run_setup = (key != self.__std_setup_key)
+                self.__std_setup_key = key
+            except (OSError, TypeError):
+                run_setup = True
+        else:
+            run_setup = False
+
+        if run_setup and setup is not None:
+            setup()
+
+        # Publish the initial frame so the viewport shows something right away.
+        self._render_one(self.__std_request_frame)
+
+        print("<<<NEO_STANDARD_READY {} {} {} {} {}>>>".format(
+            int(self.__width), int(self.__height), float(self.__fps),
+            int(self.__duration), int(self.__fb_generation)), flush=True)
+
+        # If setup() ran this dispatch it may have called attach_audio(); (re)export
+        # the preview audio and tell C++ whether to load or clear it. We skip this on
+        # render-only edits (setup didn't run, __audios is empty, and the previously
+        # exported cache is still the right one) so audio keeps playing seamlessly.
+        if run_setup:
+            self._refresh_standard_audio()
+            print("<<<NEO_STANDARD_AUDIO {}>>>".format(
+                "ready" if self.__std_has_audio else "none"), flush=True)
+
+    def _render_one(self, frame_index: int) -> None:
+        """Render a single frame on demand (standard projects) and publish it.
+
+        Clamps the request to the timeline, calls the user's render(f), validates
+        the returned frame's resolution, and mirrors it into the shared buffer.
+        """
+        if self.__std_render is None:
+            return
+        f = int(frame_index)
+        if self.__duration > 0:
+            if f < 0:
+                f = 0
+            elif f >= self.__duration:
+                f = self.__duration - 1
+
+        result = self.__std_render(f)
+        if hasattr(result, "get_pixels"):
+            write_pixels = result.get_pixels(True)
+        else:
+            write_pixels = np.asarray(result)
+
+        if write_pixels.shape != (self.__height, self.__width, 3):
+            raise ValueError(
+                f"render({f}) returned a frame of "
+                f"{write_pixels.shape[1] if write_pixels.ndim >= 2 else '?'}x"
+                f"{write_pixels.shape[0] if write_pixels.ndim >= 1 else '?'}, "
+                f"but the renderer resolution is {self.__width}x{self.__height}. "
+                f"Call renderer.set_resolution(...) in setup() so they match."
+            )
+
+        if gpu_enabled:
+            write_pixels = np.asnumpy(write_pixels)
+        self._fb_publish_single(f, write_pixels)
+
+    def _refresh_standard_audio(self) -> None:
+        """(Re)build the preview audio cache from whatever setup() attached.
+
+        Standard projects never call render() (the full-video path that normally
+        exports audio), so we export the attached tracks here instead — once per
+        dispatch in which setup() ran. Writes cached_preview_audio.aac (the same
+        file legacy previews use) and sets __std_has_audio so _run_standard can tell
+        the C++ side whether to load or clear the preview audio track.
+        """
+        cache = "cached_preview_audio.aac"
+        audios = list(self.__audios)
+        self.__std_has_audio = False
+        if audios:
+            try:
+                self._export_preview_audio_only(audios, cache)
+                self.__std_has_audio = True
+                return
+            except Exception:
+                # Export failed (bad file, ffmpeg error, ...). Fall through and treat
+                # this as "no audio" so the preview stays silent rather than playing a
+                # stale track. Surface the cause for the user.
+                import traceback as _tb
+                _tb.print_exc()
+        # No audio attached (or export failed): drop any stale cache so the preview is
+        # silent and a later legacy preview won't pick it up as "previous" audio.
+        if os.path.exists(cache):
+            import time
+            for _attempt in range(30):
+                try:
+                    os.remove(cache)
+                    break
+                except PermissionError:
+                    # Qt may still hold the handle; give it a moment to release.
+                    time.sleep(0.05)
+                except OSError:
+                    break
+
+    def _export_preview_audio_only(self, audios: List[tuple['Audio', float]], out_path: str) -> None:
+        """Mux the attached audio tracks into a single AAC file (no video).
+
+        Mirrors __attach_audios' per-track volume + amix, but emits audio only so
+        standard projects (which never produce silent_render.mp4) can still preview
+        their sound. Raises on ffmpeg failure.
+        """
+        if not audios:
+            raise ValueError("No audio streams to export.")
+
+        if len(audios) == 1:
+            audio, volume = audios[0]
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", audio.file_path(),
+                "-af", f"volume={volume}",
+                "-vn", "-acodec", "aac",
+                out_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return
+
+        audio_files = []
+        try:
+            for i, (audio, volume) in enumerate(audios):
+                tmp = f"temp_preview_audio_{i}.aac"
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-i", audio.file_path(),
+                    "-af", f"volume={volume}",
+                    "-vn", "-acodec", "aac",
+                    tmp
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                audio_files.append(tmp)
+
+            input_args = []
+            filter_complex = ""
+            for i, tmp in enumerate(audio_files):
+                input_args.extend(["-i", tmp])
+                filter_complex += f"[{i}:a]"
+            filter_complex += f"amix=inputs={len(audio_files)}:duration=longest[aout]"
+
+            subprocess.run([
+                "ffmpeg", "-y", *input_args,
+                "-filter_complex", filter_complex,
+                "-map", "[aout]",
+                "-c:a", "aac",
+                out_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        finally:
+            for tmp in audio_files:
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
 
     def render(self, preview: bool = False) -> None:
         """Render the final ordered video and optionally attach audio tracks.

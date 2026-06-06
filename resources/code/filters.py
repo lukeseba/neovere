@@ -1,6 +1,13 @@
 if len(_paths) != 0:
     class Filter:
-        """A filter that aligns a Field object with the current renderer dimensions."""
+        """A filter that masks an effect through a vector-based Field.
+
+        Filters no longer pre-bake a fixed-resolution mask. Instead they hold a
+        reference to a :class:`Field` and rasterize it on demand at the *exact*
+        resolution of the pixels being processed (via ``apply_to``). This keeps
+        the mask aligned with the frame no matter what ``dx`` / preview scaling
+        the renderer is using, so the old broadcasting mismatches can't happen.
+        """
 
         def __init_subclass__(cls, **kwargs):
             super().__init_subclass__(**kwargs)
@@ -22,58 +29,56 @@ if len(_paths) != 0:
             self.set_field(field)
 
         def set_field(self, field: Field) -> 'Filter':
-            """Set a new Field and crop its map to match the renderer dimensions.
+            """Set the Field that masks this filter.
+
+            The field is stored by reference and is rasterized lazily, so no map
+            is computed here. The last resolved mask is invalidated.
 
             Parameters:
-                field (Field): The Field object containing the source map.
+                field (Field): The Field object providing the mask.
 
             Returns:
                 Filter: The Filter instance itself (for method chaining).
             """
             self.field = field
-            full_map = self.field.get_map()[:, :, np.newaxis]
-
-            render_height = renderer.height()
-            render_width = renderer.width()
-
-            # Fast path: If the map is already perfectly sized, use it instantly
-            if full_map.shape[0] == render_height and full_map.shape[1] == render_width:
-                self._map = full_map
-                return self
-
-            # Otherwise, force it to renderer dimensions to prevent broadcasting crashes
-            target_map = np.zeros((render_height, render_width, 1), dtype=np.float32)
-
-            orig_height, orig_width = full_map.shape[:2]
-
-            start_y = max((render_height - orig_height) // 2, 0)
-            start_x = max((render_width - orig_width) // 2, 0)
-
-            copy_h = min(render_height, orig_height)
-            copy_w = min(render_width, orig_width)
-
-            src_start_y = max((orig_height - render_height) // 2, 0)
-            src_start_x = max((orig_width - render_width) // 2, 0)
-
-            # BRIDGE: Safely extract to CPU if it's on the GPU
-            full_map_cpu = full_map.get() if hasattr(full_map, 'get') else full_map
-
-            target_map[start_y:start_y+copy_h, start_x:start_x+copy_w] = full_map_cpu[src_start_y:src_start_y+copy_h, src_start_x:src_start_x+copy_w]
-
-            # Push back to active hardware
-            self._map = np.asarray(target_map)
-
+            self._map = None
             return self
 
-        def _apply(self, pixels: np.ndarray) -> None:
-            """Apply the filter to a set of pixels.
+        def _resolved_map(self, pixels: np.ndarray) -> np.ndarray:
+            """Rasterize the field to match the given pixels, as an (H, W, 1) map."""
+            height = int(pixels.shape[0])
+            width = int(pixels.shape[1])
+            m = self.field.get_map(height, width)
+            if hasattr(m, 'ndim') and m.ndim == 2:
+                m = m[:, :, np.newaxis]
+            return m
 
-            Parameters:
-                pixels (np.ndarray): The pixel data to process.
+        def _mask_for(self, pixels: np.ndarray) -> np.ndarray:
+            """Return a mask guaranteed to match ``pixels`` (resolving it if needed)."""
+            m = self._map
+            if (m is None
+                    or m.shape[0] != pixels.shape[0]
+                    or m.shape[1] != pixels.shape[1]):
+                m = self._resolved_map(pixels)
+            return m
 
-            Note:
-                This method is currently a placeholder and must be implemented.
+        def apply_to(self, pixels: np.ndarray) -> np.ndarray:
+            """Resolve the mask at the pixel resolution, then apply the filter.
+
+            This is the entry point used by ``Frame.apply_filter``. It sets
+            ``self._map`` (an (H, W, 1) float mask in [0, 1]) so that even custom
+            ``apply`` implementations that reference ``self._map`` directly work
+            without worrying about resolution.
             """
+            self._map = self._resolved_map(pixels)
+            return self.apply(pixels)
+
+        def apply(self, pixels: np.ndarray) -> np.ndarray:
+            """Apply the filter to a set of pixels (overridden by subclasses)."""
+            return pixels
+
+        def _apply(self, pixels: np.ndarray) -> None:
+            """Deprecated placeholder kept for backwards compatibility."""
             pass
 
     class Solid_Color(Filter):
@@ -107,15 +112,12 @@ if len(_paths) != 0:
 
         def apply(self, pixels: np.ndarray) -> np.ndarray:
             """Apply the solid color filter to pixel data using the field mask."""
+            m = self._mask_for(pixels)
 
             # Explicitly convert the Python list to an array so CuPy can process it
             color_array = np.array([self.__b, self.__g, self.__r])
 
-            pixels = np.clip(
-                (pixels * (1 - self._map) + color_array * self._map),
-                0, 255
-            )
-            return pixels
+            return np.clip(pixels * (1 - m) + color_array * m, 0, 255)
 
     class Invert(Filter):
         """A filter that inverts the colors of a Field-based mask."""
@@ -140,11 +142,13 @@ if len(_paths) != 0:
             Returns:
                 np.ndarray: The color-inverted and blended pixel data, clipped to the valid range [0, 255].
             """
+            m = self._mask_for(pixels)
+
             # Invert the pixels
             inverted_pixels = 255 - pixels
 
             # Blend based on the map values
-            filtered_pixels = (1 - self._map) * pixels + self._map * inverted_pixels
+            filtered_pixels = (1 - m) * pixels + m * inverted_pixels
 
             return np.clip(filtered_pixels, 0, 255)
 
@@ -179,6 +183,8 @@ if len(_paths) != 0:
             Returns:
                 np.ndarray: The image with the frame applied at the specified position, blended with the field map.
             """
+            m = self._mask_for(pixels)
+
             frame_pixels = self.frame.get_pixels()
             frame_h, frame_w = frame_pixels.shape[:2]
             pixels_h, pixels_w = pixels.shape[:2]
@@ -217,7 +223,7 @@ if len(_paths) != 0:
             new_frame[y_start:y_end, x_start:x_end] = frame_pixels[frame_y_start:frame_y_end, frame_x_start:frame_x_end]
 
             # Blend with the field map
-            return np.clip(self._map * new_frame + (1 - self._map) * pixels, 0, 255)
+            return np.clip(m * new_frame + (1 - m) * pixels, 0, 255)
 
         def set_position(self, x: int, y: int) -> 'Draw_Frame':
             """Updates the frame's position.
@@ -259,4 +265,3 @@ if len(_paths) != 0:
             """
             self.frame = Frame(cv2.flip(self.frame.get_pixels(), 0))
             return self
-

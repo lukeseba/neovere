@@ -30,6 +30,7 @@
                 <file>resources/code/footer.py</file>
                 <file>resources/code/header.py</file>
                 <file>resources/code/default_project.py</file>
+                <file>resources/code/default_project_standard.py</file>
                 <file>resources/code/default_class.py</file>
                 <file>resources/code/default_field.py</file>
                 <file>resources/code/default_filter.py</file>

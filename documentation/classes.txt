@@ -360,6 +360,11 @@
 #    Raises:
 #        ValueError: If the volume is not between 0.0 and 1.0.
 #
+#    Notes:
+#    Passing audio=None is a no-op. This lets standard projects call
+#    renderer.attach_audio(video.audio) in setup() without checking whether
+#    the source clip actually has an audio track.
+#
 
     set_resolution(width: int, height: int) -> None:
 #    Change the resolution of the output video.
@@ -382,6 +387,21 @@
 #    Returns:
 #        int: Current fps value.
 #
+
+    set_duration(frames: int) -> None:
+#    Set the timeline length, in frames, for a 'standard' project.
+#
+#    Standard projects render frames on demand (one at a time) rather than
+#    building the whole video up front, so the engine needs to be told how
+#    many frames the timeline spans. Used to clamp render(f) requests and to
+#    drive the playback scrubber / export range.
+#
+#    Parameters:
+#        frames (int): Total number of frames in the timeline.
+#
+
+    duration() -> int:
+#    Get the timeline length in frames (see set_duration).
 
     width() -> int:
 #    Get the current video width.
@@ -409,6 +429,9 @@
 #    Raises:
 #        TypeError: If input type is invalid.
 #
+
+    is_standard() -> bool:
+#    True if the most recently executed script registered a render via run().
 
     render(preview: bool = False) -> None:
 #    Render the final ordered video and optionally attach audio tracks.

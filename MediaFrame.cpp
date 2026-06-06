@@ -226,3 +226,14 @@ void MediaFrame::switchToImageFile() {
     if (controller) controller->pause();
     stack->setCurrentIndex(2);
 }
+
+void MediaFrame::beginStandardMode(int durationFrames, float fps, bool freshEntry) {
+    // Standard projects render into the shared frame buffer (slot 0), so we use
+    // the same widget/stack page as the preview frame-buffer path.
+    switchToFrameBuffer();
+    if (controller) controller->setStandardMode(durationFrames, fps, freshEntry);
+}
+
+void MediaFrame::endStandardMode() {
+    if (controller) controller->clearStandardMode();
+}

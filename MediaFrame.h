@@ -41,6 +41,14 @@ public:
     Mode currentMode() const { return mode; }
     PlaybackController* fbController() { return controller; }
 
+    // === 'standard' template (on-demand single-frame) playback ===
+    // Enter on-demand mode: the panel shows the frame buffer's slot 0 and the
+    // controller drives the timeline from durationFrames/fps, requesting frames
+    // on demand. freshEntry resets the playhead to 0 (first entry); otherwise it
+    // is preserved (a render-only edit keeps the current position).
+    void beginStandardMode(int durationFrames, float fps, bool freshEntry);
+    void endStandardMode();                            // leave on-demand mode (back to legacy buffer playback)
+
 signals:
     void pauseStateChanged(bool paused);
 

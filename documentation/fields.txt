@@ -1,311 +1,122 @@
 * class Field:
+#    A vector-based field.
+#
+#    A Field tracks only the *shape(s)* that define it (polygons / contours)
+#    rather than a full-canvas bitmap. There is no background: the geometry is
+#    stored resolution-independently and rasterized on demand by ``get_map``.
+#
+#    Each field also carries reversible, render-time effects:
+#    * ``blur_amount``    - softens the whole mask (Gaussian).
+#    * ``feather_amount`` - fades the shape edges inward.
+#    * ``inverted``       - flips the mask (everything except the shape).
+#    These are applied only while rasterizing, so the underlying geometry is
+#    never destroyed and the effects can be undone (set the amount back to 0).
+#
 
     profiled_init(*args, **kw):
 
     __init__() -> None:
-#    Initialize a Field object with a blank, zero-filled map.
-#
-#    The map is initialized with dimensions based on the renderer and
-#    stores 8-bit unsigned integer values (0–255).
-#
+#    Initialize an empty Field (no shapes, no background).
 
-    get(x: int, y: int) -> np.float16:
-#    Retrieve the normalized value at a given coordinate.
+    add(other) -> 'Field':
+#    Add another Field, a raw map, or a scalar to this Field (in place).
+
+    sub(other) -> 'Field':
+#    Subtract another Field, a raw map, or a scalar from this Field (in place).
+
+    mult(other) -> 'Field':
+#    Multiply this Field by a scalar (scales intensity) or another Field (in place).
+
+    div(other) -> 'Field':
+#    Divide this Field by a scalar or another Field (in place).
+
+    move(dx: float, dy: float) -> 'Field':
+#    Translate the field by (dx, dy) pixels.
+
+    resize(scale: float) -> 'Field':
+#    Scale the field by ``scale``, anchored at its own center.
 #
 #    Parameters:
-#        x (int): X-coordinate (column index).
-#        y (int): Y-coordinate (row index).
-#
-#    Returns:
-#        np.float16: The value at (x, y), normalized to [0, 1].
-#
-
-    set(value: float, x: int, y: int) -> None:
-#    Set a normalized value at a given coordinate.
-#
-#    Parameters:
-#        value (float): Value between 0 and 1.
-#        x (int): X-coordinate.
-#        y (int): Y-coordinate.
-#
-
-    add(other: 'Field' or float) -> 'Field':
-#    Add another Field or a scalar to this Field.
-#
-#    Parameters:
-#        other (Field or float): Field or scalar value to add.
-#
-#    Returns:
-#        Field: The updated Field object.
-#
-
-    sub(other: 'Field' or float) -> 'Field':
-#    Subtract another Field or a scalar from this Field.
-#
-#    Parameters:
-#        other (Field or float): Field or scalar value to subtract.
-#
-#    Returns:
-#        Field: The updated Field object.
-#
-
-    mult(other: 'Field' or float) -> 'Field':
-#    Multiply this Field by another Field or scalar.
-#
-#    Parameters:
-#        other (Field or float): Field or scalar multiplier.
-#
-#    Returns:
-#        Field: The updated Field object.
-#
-
-    div(other: 'Field' or float) -> 'Field':
-#    Divide this Field by another Field or scalar.
-#
-#    Parameters:
-#        other (Field or float): Field or scalar divisor.
-#
-#    Returns:
-#        Field: The updated Field object.
-#
-
-    invert() -> 'Field':
-#    Invert the field, flipping 0s to 255s and vice versa.
-#
-#    Returns:
-#        Field: The updated Field object.
-#
-
-    move(dx: int, dy: int) -> 'Field':
-#    Translate the field by (dx, dy) using an affine transform.
-#
-#    Parameters:
-#        dx (int): Horizontal shift (positive is right).
-#        dy (int): Vertical shift (positive is down).
-#
-#    Returns:
-#        Field: The updated Field object.
-#
-#    Raises:
-#        ValueError: If the image exceeds OpenCV's size limits.
-#
-
-    resize(width_or_scale: int or float, height: int = None) -> 'Field':
-#    Resize the field to specific dimensions or by a scale factor.
-#
-#    Parameters:
-#        width_or_scale (int or float): Target width or a scale factor.
-#        height (int, optional): Target height (only if resizing by explicit dimensions).
-#
-#    Returns:
-#        Field: The resized Field object.
-#
-
-    scale(scale_x: float, scale_y: float = None) -> 'Field':
-#    Scale the field by a factor along the x and y axes.
-#
-#    Parameters:
-#        scale_x (float): Scaling factor for width.
-#        scale_y (float, optional): Scaling factor for height (defaults to scale_x if None).
-#
-#    Returns:
-#        Field: The scaled Field object.
-#
-#    Raises:
-#        ValueError: If any scale factor is non-positive.
+#        scale (float): Scale factor (>1 grows, <1 shrinks). The shape's
+#        center stays put while it grows/shrinks around it.
 #
 
     fit() -> 'Field':
-#    Stretch the region containing active values to fill the canvas.
-#
-#    Returns:
-#        Field: The updated Field object.
-#
-
-    preview(wait_for_exit: bool = False, title: str = "Field Preview") -> None:
-#    Display the field using OpenCV.
-#
-#    Parameters:
-#        wait_for_exit (bool): Whether to wait for a user key press before exiting.
-#        title (str): Title of the display window.
-#
-
-    get_map() -> np.ndarray:
-#    Get the normalized field map.
-#
-#    Returns:
-#        np.ndarray: The map normalized to [0, 1].
-#
-
-    set_map(map: np.ndarray) -> None:
-#    Set the internal map.
-#
-#    Parameters:
-#        map (np.ndarray): New map data (must match expected shape).
-#
-
-    blur(param: tuple = (5, 5)) -> 'Field':
-#    Apply a blur to the field.
-#
-#    Parameters:
-#        param (tuple): Kernel size for blurring.
-#
-#    Returns:
-#        Field: The blurred Field object.
-#
+#    Stretch the field's bounding box to fill the whole canvas.
 
     mirror_x() -> 'Field':
 #    Mirror the field along the vertical (X) axis.
-#
-#    Returns:
-#        Field: The mirrored Field object.
-#
 
     mirror_y() -> 'Field':
 #    Mirror the field along the horizontal (Y) axis.
-#
-#    Returns:
-#        Field: The mirrored Field object.
-#
 
-    crop(top_left: tuple, bottom_right: tuple) -> 'Field':
-#    Crop the field to a rectangle defined by two points.
+    invert() -> 'Field':
+#    Invert the field (everything except the shape). Reversible.
+
+    blur(amount=5) -> 'Field':
+#    Set the (reversible) blur amount in pixels. ``amount`` may also be a
+#    kernel tuple like ``(5, 5)`` for backwards compatibility. Use
+#    ``unblur()`` or ``blur(0)`` to remove it without touching the shape.
+
+    feather(amount=5) -> 'Field':
+#    Set the (reversible) feather amount in pixels (fades edges inward).
+#    Use ``unfeather()`` or ``feather(0)`` to remove it.
+
+    unblur() -> 'Field':
+#    Remove blur, restoring the crisp underlying shape.
+
+    unfeather() -> 'Field':
+#    Remove feathering, restoring hard edges.
+
+    get(x: int, y: int) -> float:
+#    Sample the (rasterized) normalized value at a coordinate, in [0, 1].
+
+    preview(wait_for_exit: bool = False, title: str = "Field Preview") -> None:
+#    Display the rasterized field using OpenCV.
+
+    get_map(height: int = None, width: int = None) -> np.ndarray:
+#    Rasterize the field to a normalized [0, 1] bitmap.
 #
 #    Parameters:
-#        top_left (tuple): (x, y) coordinates for the top-left corner.
-#        bottom_right (tuple): (x, y) coordinates for the bottom-right corner.
+#        height (int, optional): Target height. Defaults to the renderer's.
+#        width (int, optional): Target width. Defaults to the renderer's.
 #
 #    Returns:
-#        Field: The cropped Field object.
+#        np.ndarray: A (height, width) float32 map in [0, 1]. Because the
+#        field is vector-based, it is rasterized at whatever resolution is
+#        requested, so it always matches the pixels it will be applied to.
 #
 
 * class FOverlay(Field):
 
     __init__(opacity: float = 1.0) -> None:
-#    Initialize an FOverlay object with a uniform opacity field.
-#
-#    The overlay is initialized to a constant opacity across the entire canvas.
-#    Opacity should be a value between 0 (fully transparent) and 1 (fully opaque).
-#
-#    Parameters:
-#        opacity (float, optional): Initial opacity value for the overlay.
-#        Defaults to 1.0 (fully opaque).
-#
-#    Raises:
-#        ValueError: If opacity is not within the range [0, 1].
-#
+#    A uniform whole-canvas field at the given opacity (0..1).
 
 * class FLine(Field):
 
     __init__(x1: float, y1: float, x2: float, y2: float, thickness: float) -> None:
-#    Initialize an FLine object that draws a straight line on the field.
-#
-#    Creates a binary line between two points with a specified thickness.
-#    The line is drawn onto the field's internal map immediately upon initialization.
-#
-#    Parameters:
-#        x1 (float): X-coordinate of the start point.
-#        y1 (float): Y-coordinate of the start point.
-#        x2 (float): X-coordinate of the end point.
-#        y2 (float): Y-coordinate of the end point.
-#        thickness (float): Thickness of the line in pixels.
-#
-#    Raises:
-#        ValueError: If thickness is not a positive number.
-#
+#    A straight line of the given thickness, stored as a vector rectangle.
 
 * class FRect(Field):
 
     __init__(x1: float, y1: float, x2: float, y2: float, thickness: int = -1) -> None:
-#    Initialize an FRect object that draws a rectangle on the field.
-#
-#    Creates a rectangle between two points, with customizable thickness.
-#    By default, the rectangle is filled if thickness is set to -1.
-#
-#    Parameters:
-#        x1 (float): X-coordinate of the top-left corner.
-#        y1 (float): Y-coordinate of the top-left corner.
-#        x2 (float): X-coordinate of the bottom-right corner.
-#        y2 (float): Y-coordinate of the bottom-right corner.
-#        thickness (int, optional): Thickness of the rectangle border.
-#        - Set to -1 to fill the rectangle. Defaults to -1.
-#
-#    Raises:
-#        ValueError: If thickness is not -1 and is less than or equal to 0.
-#
+#    A rectangle. ``thickness == -1`` fills it; otherwise draws a border ring.
 
 * class FEllipse(Field):
-#    Initialize an FEllipse object that draws an ellipse on the field.
-#
-#    Creates an ellipse centered at a given point with specified width, height,
-#    rotation angle, and border thickness. By default, the ellipse is filled
-#    if thickness is set to -1.
-#
-#    Parameters:
-#        center (tuple[float, float]): (x, y) coordinates for the center of the ellipse.
-#        ellipse_width (float): Total width of the ellipse's bounding box.
-#        ellipse_height (float): Total height of the ellipse's bounding box.
-#        angle (float, optional): Rotation angle of the ellipse in degrees.
-#        Defaults to 0 (no rotation).
-#        thickness (int, optional): Thickness of the ellipse border.
-#        - Set to -1 to fill the ellipse (default).
-#
-#    Raises:
-#        ValueError: If thickness is not -1 and is less than or equal to 0.
-#
+#    An ellipse, approximated as a vector polygon (filled or a border ring).
 
 * class FPoly(Field):
 
     __init__(points: np.ndarray) -> None:
-#    Initialize an FPoly object that draws a filled polygon on the field.
-#
-#    Takes a set of points and fills a polygon based on their coordinates.
-#    The polygon will be drawn in white (value 255) onto the field map.
-#
-#    Parameters:
-#        points (np.ndarray): A NumPy array of shape (N, 2) containing (x, y) coordinates
-#        for the vertices of the polygon.
-#
-#    - N must be at least 3 to form a valid polygon.
-#    - Points are automatically reshaped as required by OpenCV.
-#
-#    Raises:
-#        ValueError: If fewer than 3 points are provided.
-#
+#    A filled polygon from an array of (x, y) vertices.
 
 * class FText(Field):
-#    Initialize an FText object that renders text onto the field map.
-#
-#    Allows rendering text either using a custom TrueType font (via Pillow) or using
-#    OpenCV's built-in fonts. The text is automatically center-aligned based on the
-#    provided position.
-#
-#    Parameters:
-#        text (str): The text string to render.
-#        position (tuple): A tuple (x, y) representing the center position for the text.
-#        font_scale (float): Scale factor to size the text.
-#        thickness (int, optional): Thickness of the text stroke (default is 1).
-#        custom_font (str, optional): Path to a custom TTF font file.
-#        If None, OpenCV's default font is used.
-#
-#    Raises:
-#        FileNotFoundError: If a custom font path is provided but the file cannot be found.
-#
+#    Text, rendered once to a bitmap and then vectorized into contours.
 
 * class FAudio(Field):
 
     __init__(aud: FrameAudio, start: int = 0, end: int = None) -> None:
-#    Initialize an FAudio object to visualize the audio frame data on the field map.
-#
-#    This class generates a visualization of the audio frame's magnitudes within the
-#    specified frequency range. It creates bars corresponding to the frequencies and
-#    displays a volume indicator based on the RMS volume of the frame.
-#
-#    Parameters:
-#        aud (FrameAudio): The FrameAudio object containing the audio data.
-#        start (int, optional): The starting frequency in Hz (default is 0).
-#        end (int, optional): The ending frequency in Hz. If None, uses the full range.
-#
+#    Visualize an audio frame's spectrum as vector bars plus a volume bar.
 
 class FDepth_Slice(Field):
 

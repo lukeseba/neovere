@@ -27,13 +27,13 @@ except ImportError:
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-_paths = ["render.mp4", "C:/Users/luke/Videos/cloudmap.mp4", "C:/Users/luke/Videos/snd/versailles/versailles_beat.mp3", "C:/Users/luke/Videos/snd/versailles/versailles_vocals.mp3"]
+_paths = ["render.mp4"]
 arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 
 api_key = "" #[%$# #$%]
 gpu_enabled = True
-dx = 0.25
-dt = 0.5
+dx = 1.0
+dt = 1.0
 
 audio_counter = 0
 
@@ -185,7 +185,12 @@ class Frame:
             filter: A filter to apply to the frame
         """
         with _profile(f"filter:{filter.__class__.__name__}"):
-            self._pixels = filter.apply(self.get_pixels().astype(np.uint16)).astype(np.uint8)
+            # Prefer apply_to (resolves the field mask at the frame's exact
+            # resolution); fall back to apply for legacy/custom filters.
+            runner = getattr(filter, "apply_to", None)
+            if runner is None:
+                runner = filter.apply
+            self._pixels = runner(self.get_pixels().astype(np.uint16)).astype(np.uint8)
 
         return self
 
@@ -1114,6 +1119,19 @@ class NonlinearRenderer:
         self.__fb_failed = False         # if buffer alloc failed, fall back to video file
         self.__fb_actual_frames = 0      # number of frames the user actually wrote
 
+        # -- 'standard' template state (setup/render projects driven by run()) --
+        # A standard project precomputes state in setup() and renders individual
+        # frames on demand via render(f). The engine keeps the registered render
+        # callback alive (its __globals__ holds the user's namespace) so frames
+        # can be produced one at a time without rebuilding the whole video.
+        self.__duration = 0              # timeline length in frames (set_duration)
+        self.__std_setup = None          # the user's setup() callable
+        self.__std_render = None         # the user's render(f) callable
+        self.__std_setup_key = None      # source hash of the last setup() we ran
+        self.__std_registered = False    # True once run() registered this dispatch
+        self.__std_request_frame = 0     # frame to render for the initial publish
+        self.__std_has_audio = False     # True if setup() attached audio this session
+
     def set_use_frame_buffer(self, enabled: bool) -> None:
         """When enabled, set_frame() also writes frames to a shared-memory buffer
         for the C++ side to display directly (skipping the video file decode path).
@@ -1228,6 +1246,35 @@ class NonlinearRenderer:
         except Exception as e:
             print(f"[fb] header write failed: {e}")
 
+    def _fb_publish_single(self, frame_index: int, write_pixels) -> None:
+        """Publish ONE frame to the shared buffer for on-demand (standard) playback.
+
+        Unlike set_frame()'s accumulation, this always writes to slot 0 and
+        reports frame_count=1: the C++ side displays "the latest frame" and uses
+        the timeline duration (set_duration) for the scrubber, not the buffer's
+        frame_count. Bumps the generation and prints a per-frame sentinel so the
+        viewport knows which logical frame just became available.
+
+        write_pixels must be HxWx3 uint8 in cv2's BGR order (as get_pixels(True)
+        returns); the buffer stores RGB, so we swap channels on write.
+        """
+        if self.__fb_mm is None:
+            if not self._fb_allocate():
+                self.__fb_failed = True
+                return
+        if self.__fb_mm is None:
+            return
+        # cv2 gives BGR, the buffer holds RGB. Convert with a fast slice swap.
+        self.__fb_mm[0] = write_pixels[:, :, ::-1]
+        try:
+            self.__fb_mm.flush()
+        except Exception:
+            pass
+        self.__fb_actual_frames = 1
+        self.__fb_generation += 1
+        self._fb_write_header(1)
+        print(f"<<<NEO_FRAME {int(frame_index)} {self.__fb_generation}>>>", flush=True)
+
     def set_frame(self, frame_index: int, new_frame: 'Frame') -> None:
         """Set a frame at a specific index for the output video.
 
@@ -1286,7 +1333,14 @@ class NonlinearRenderer:
 
         Raises:
             ValueError: If the volume is not between 0.0 and 1.0.
+
+        Notes:
+            Passing audio=None is a no-op. This lets standard projects call
+            renderer.attach_audio(video.audio) in setup() without checking whether
+            the source clip actually has an audio track.
         """
+        if audio is None:
+            return
         if not 0.0 <= volume <= 1.0:
             raise ValueError("Volume must be between 0.0 and 1.0.")
         self.__audios.append((audio, volume))
@@ -1329,6 +1383,23 @@ class NonlinearRenderer:
         """
         return self.__fps
 
+    def set_duration(self, frames: int) -> None:
+        """Set the timeline length, in frames, for a 'standard' project.
+
+        Standard projects render frames on demand (one at a time) rather than
+        building the whole video up front, so the engine needs to be told how
+        many frames the timeline spans. Used to clamp render(f) requests and to
+        drive the playback scrubber / export range.
+
+        Parameters:
+            frames (int): Total number of frames in the timeline.
+        """
+        self.__duration = max(0, int(frames))
+
+    def duration(self) -> int:
+        """Get the timeline length in frames (see set_duration)."""
+        return self.__duration
+
     def width(self) -> int:
         """Get the current video width.
 
@@ -1363,6 +1434,207 @@ class NonlinearRenderer:
             return int(seconds * self.fps())
         else:
             raise TypeError("Expected an int, float, or list of floats.")
+
+    # ------------------------------------------------------------------ #
+    #  'standard' template support (setup/render projects via run())      #
+    # ------------------------------------------------------------------ #
+
+    def _begin_dispatch(self, fresh_namespace: bool = False) -> None:
+        """Called by the worker before (re-)executing a user script.
+
+        Clears the standard-mode registration so we can detect whether the NEW
+        script calls run(). When the worker had to start a fresh namespace
+        (e.g. the previous project was legacy), it passes fresh_namespace=True
+        and we also forget the last setup() hash, forcing setup() to run again
+        so its precomputed globals are repopulated in the new namespace.
+        """
+        self.__std_registered = False
+        self.__std_render = None
+        self.__std_setup = None
+        if fresh_namespace:
+            self.__std_setup_key = None
+
+    def _set_request_frame(self, frame_index: int) -> None:
+        """Set which frame run() should render for its initial publish."""
+        self.__std_request_frame = max(0, int(frame_index))
+
+    def is_standard(self) -> bool:
+        """True if the most recently executed script registered a render via run()."""
+        return self.__std_registered
+
+    def _run_standard(self, setup, render) -> None:
+        """Engine entry point for 'standard' projects (called by the module-level
+        run(setup, render)). Runs setup() once — and again only when its source
+        changes — then publishes the initial frame and signals readiness. Returns
+        immediately; subsequent frames are produced on demand by _render_one().
+        """
+        if not callable(render):
+            raise TypeError("run(setup, render): render must be a callable taking one argument (the frame index).")
+        self.__std_render = render
+        self.__std_setup = setup
+        self.__std_registered = True
+
+        # Run setup() only when its source changed since the last run, so that
+        # render-only edits keep the precomputed globals alive (the worker reuses
+        # the namespace). If we can't read the source, run it every time.
+        run_setup = True
+        if setup is not None:
+            try:
+                import inspect, hashlib
+                src = inspect.getsource(setup)
+                key = hashlib.sha1(src.encode("utf-8")).hexdigest()
+                run_setup = (key != self.__std_setup_key)
+                self.__std_setup_key = key
+            except (OSError, TypeError):
+                run_setup = True
+        else:
+            run_setup = False
+
+        if run_setup and setup is not None:
+            setup()
+
+        # Publish the initial frame so the viewport shows something right away.
+        self._render_one(self.__std_request_frame)
+
+        print("<<<NEO_STANDARD_READY {} {} {} {} {}>>>".format(
+            int(self.__width), int(self.__height), float(self.__fps),
+            int(self.__duration), int(self.__fb_generation)), flush=True)
+
+        # If setup() ran this dispatch it may have called attach_audio(); (re)export
+        # the preview audio and tell C++ whether to load or clear it. We skip this on
+        # render-only edits (setup didn't run, __audios is empty, and the previously
+        # exported cache is still the right one) so audio keeps playing seamlessly.
+        if run_setup:
+            self._refresh_standard_audio()
+            print("<<<NEO_STANDARD_AUDIO {}>>>".format(
+                "ready" if self.__std_has_audio else "none"), flush=True)
+
+    def _render_one(self, frame_index: int) -> None:
+        """Render a single frame on demand (standard projects) and publish it.
+
+        Clamps the request to the timeline, calls the user's render(f), validates
+        the returned frame's resolution, and mirrors it into the shared buffer.
+        """
+        if self.__std_render is None:
+            return
+        f = int(frame_index)
+        if self.__duration > 0:
+            if f < 0:
+                f = 0
+            elif f >= self.__duration:
+                f = self.__duration - 1
+
+        result = self.__std_render(f)
+        if hasattr(result, "get_pixels"):
+            write_pixels = result.get_pixels(True)
+        else:
+            write_pixels = np.asarray(result)
+
+        if write_pixels.shape != (self.__height, self.__width, 3):
+            raise ValueError(
+                f"render({f}) returned a frame of "
+                f"{write_pixels.shape[1] if write_pixels.ndim >= 2 else '?'}x"
+                f"{write_pixels.shape[0] if write_pixels.ndim >= 1 else '?'}, "
+                f"but the renderer resolution is {self.__width}x{self.__height}. "
+                f"Call renderer.set_resolution(...) in setup() so they match."
+            )
+
+        if gpu_enabled:
+            write_pixels = np.asnumpy(write_pixels)
+        self._fb_publish_single(f, write_pixels)
+
+    def _refresh_standard_audio(self) -> None:
+        """(Re)build the preview audio cache from whatever setup() attached.
+
+        Standard projects never call render() (the full-video path that normally
+        exports audio), so we export the attached tracks here instead — once per
+        dispatch in which setup() ran. Writes cached_preview_audio.aac (the same
+        file legacy previews use) and sets __std_has_audio so _run_standard can tell
+        the C++ side whether to load or clear the preview audio track.
+        """
+        cache = "cached_preview_audio.aac"
+        audios = list(self.__audios)
+        self.__std_has_audio = False
+        if audios:
+            try:
+                self._export_preview_audio_only(audios, cache)
+                self.__std_has_audio = True
+                return
+            except Exception:
+                # Export failed (bad file, ffmpeg error, ...). Fall through and treat
+                # this as "no audio" so the preview stays silent rather than playing a
+                # stale track. Surface the cause for the user.
+                import traceback as _tb
+                _tb.print_exc()
+        # No audio attached (or export failed): drop any stale cache so the preview is
+        # silent and a later legacy preview won't pick it up as "previous" audio.
+        if os.path.exists(cache):
+            import time
+            for _attempt in range(30):
+                try:
+                    os.remove(cache)
+                    break
+                except PermissionError:
+                    # Qt may still hold the handle; give it a moment to release.
+                    time.sleep(0.05)
+                except OSError:
+                    break
+
+    def _export_preview_audio_only(self, audios: List[tuple['Audio', float]], out_path: str) -> None:
+        """Mux the attached audio tracks into a single AAC file (no video).
+
+        Mirrors __attach_audios' per-track volume + amix, but emits audio only so
+        standard projects (which never produce silent_render.mp4) can still preview
+        their sound. Raises on ffmpeg failure.
+        """
+        if not audios:
+            raise ValueError("No audio streams to export.")
+
+        if len(audios) == 1:
+            audio, volume = audios[0]
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", audio.file_path(),
+                "-af", f"volume={volume}",
+                "-vn", "-acodec", "aac",
+                out_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return
+
+        audio_files = []
+        try:
+            for i, (audio, volume) in enumerate(audios):
+                tmp = f"temp_preview_audio_{i}.aac"
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-i", audio.file_path(),
+                    "-af", f"volume={volume}",
+                    "-vn", "-acodec", "aac",
+                    tmp
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                audio_files.append(tmp)
+
+            input_args = []
+            filter_complex = ""
+            for i, tmp in enumerate(audio_files):
+                input_args.extend(["-i", tmp])
+                filter_complex += f"[{i}:a]"
+            filter_complex += f"amix=inputs={len(audio_files)}:duration=longest[aout]"
+
+            subprocess.run([
+                "ffmpeg", "-y", *input_args,
+                "-filter_complex", filter_complex,
+                "-map", "[aout]",
+                "-c:a", "aac",
+                out_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        finally:
+            for tmp in audio_files:
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
 
     def render(self, preview: bool = False) -> None:
         """Render the final ordered video and optionally attach audio tracks.
@@ -2078,6 +2350,20 @@ if _paths:
 
 if len(_paths) != 0:
     class Field:
+        """A vector-based field.
+
+        A Field tracks only the *shape(s)* that define it (polygons / contours)
+        rather than a full-canvas bitmap. There is no background: the geometry is
+        stored resolution-independently and rasterized on demand by ``get_map``.
+
+        Each field also carries reversible, render-time effects:
+            * ``blur_amount``    - softens the whole mask (Gaussian).
+            * ``feather_amount`` - fades the shape edges inward.
+            * ``inverted``       - flips the mask (everything except the shape).
+        These are applied only while rasterizing, so the underlying geometry is
+        never destroyed and the effects can be undone (set the amount back to 0).
+        """
+
         def __init_subclass__(cls, **kwargs):
             super().__init_subclass__(**kwargs)
             original_init = cls.__init__
@@ -2087,571 +2373,697 @@ if len(_paths) != 0:
             cls.__init__ = profiled_init
 
         def __init__(self) -> None:
-            """Initialize a Field object with a blank, zero-filled map.
+            """Initialize an empty Field (no shapes, no background)."""
+            self.shapes = []                       # list of shape dicts (vector or raster)
+            self.blur_amount = 0.0                 # reversible Gaussian blur (px @ ref res)
+            self.feather_amount = 0.0              # reversible edge feather (px @ ref res)
+            self.inverted = False                  # invert the rasterized mask
+            self._ref_w = int(renderer.width())    # resolution shapes were authored at
+            self._ref_h = int(renderer.height())
+            self._cache = {}                       # (h, w) -> cached CPU float32 mask
+            self._device_cache = {}                # (h, w) -> cached backend (GPU/CPU) map
 
-            The map is initialized with dimensions based on the renderer and
-            stores 8-bit unsigned integer values (0–255).
-            """
-            self._map = np.zeros((renderer.height(), renderer.width()), dtype=np.uint8)
-            self.inverted = False
-
-        def get(self, x: int, y: int) -> np.float16:
-            """Retrieve the normalized value at a given coordinate.
-
-            Parameters:
-                x (int): X-coordinate (column index).
-                y (int): Y-coordinate (row index).
-
-            Returns:
-                np.float16: The value at (x, y), normalized to [0, 1].
-            """
-            return (self._map[y][x] / 255).astype(np.float16)
-
-        def set(self, value: float, x: int, y: int) -> None:
-            """Set a normalized value at a given coordinate.
-
-            Parameters:
-                value (float): Value between 0 and 1.
-                x (int): X-coordinate.
-                y (int): Y-coordinate.
-            """
-            self._map[y][x] = int(value * 255)
-
-        def add(self, other: 'Field' or float) -> 'Field':
-            """Add another Field or a scalar to this Field.
-
-            Parameters:
-                other (Field or float): Field or scalar value to add.
-
-            Returns:
-                Field: The updated Field object.
-            """
-            if isinstance(other, Field):
-                return self.add(other.get_map())
-            self._map = np.clip(self._map.astype(np.int16) + other * 255, 0, 255).astype(np.uint8)
+        # ------------------------------------------------------------------ #
+        # Shape construction helpers (used by subclasses)
+        # ------------------------------------------------------------------ #
+        def _add_poly(self, contours, holes=None, value: float = 1.0, additive: bool = True) -> 'Field':
+            """Append a filled polygon shape (with optional holes) to this field."""
+            c = [rnp.asarray(x, dtype=rnp.float32).reshape(-1, 2) for x in contours]
+            hl = [rnp.asarray(x, dtype=rnp.float32).reshape(-1, 2) for x in (holes or [])]
+            self.shapes.append({
+                'type': 'poly', 'contours': c, 'holes': hl,
+                'value': float(value), 'additive': bool(additive),
+            })
             return self
 
-        def sub(self, other: 'Field' or float) -> 'Field':
-            """Subtract another Field or a scalar from this Field.
+        def _add_contours_from_mask(self, mask, value: float = 1.0, additive: bool = True) -> 'Field':
+            """Vectorize a binary/grayscale bitmap into polygon contours (with holes).
 
-            Parameters:
-                other (Field or float): Field or scalar value to subtract.
-
-            Returns:
-                Field: The updated Field object.
+            Used for shapes that are easiest to draw first (e.g. text) and then
+            convert to a resolution-independent vector form.
             """
-            if isinstance(other, Field):
-                return self.sub(other.get_map())
-            self._map = self.add(other * -1)
+            m = mask.get() if hasattr(mask, 'get') else rnp.asarray(mask)
+            if m.dtype == rnp.uint8:
+                binary = (m > 127).astype(rnp.uint8)
+            else:
+                binary = (m > 0.5).astype(rnp.uint8)
+            found = cv2.findContours(binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+            contours = found[-2]
+            hierarchy = found[-1]
+            outers, holes = [], []
+            if hierarchy is not None and len(contours):
+                hierarchy = hierarchy[0]
+                for i, cnt in enumerate(contours):
+                    pts = cnt.reshape(-1, 2).astype(rnp.float32)
+                    if len(pts) < 3:
+                        continue
+                    if hierarchy[i][3] == -1:
+                        outers.append(pts)
+                    else:
+                        holes.append(pts)
+            if outers or holes:
+                self.shapes.append({
+                    'type': 'poly', 'contours': outers, 'holes': holes,
+                    'value': float(value), 'additive': bool(additive),
+                })
             return self
 
-        def mult(self, other: 'Field' or float) -> 'Field':
-            """Multiply this Field by another Field or scalar.
+        def _fullcanvas_shape(self, value: float, additive: bool = True) -> dict:
+            """A shape covering the whole reference canvas (used by FOverlay / scalars)."""
+            w, h = self._ref_w, self._ref_h
+            rect = rnp.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=rnp.float32)
+            return {'type': 'poly', 'contours': [rect], 'holes': [],
+                    'value': float(value), 'additive': bool(additive)}
 
-            Parameters:
-                other (Field or float): Field or scalar multiplier.
+        def _raster_shape(self, mask, additive: bool = True) -> dict:
+            """Wrap a precomputed float mask as a (resolution-locked) raster shape."""
+            m = mask.get() if hasattr(mask, 'get') else rnp.asarray(mask)
+            m = m.astype(rnp.float32)
+            if m.shape[0] != self._ref_h or m.shape[1] != self._ref_w:
+                m = cv2.resize(m, (self._ref_w, self._ref_h), interpolation=cv2.INTER_LINEAR)
+            return {'type': 'raster', 'mask': m, 'value': 1.0, 'additive': bool(additive)}
 
-            Returns:
-                Field: The updated Field object.
-            """
-            if isinstance(other, Field):
-                return self.mult(other.get_map())
-            self._map = np.clip(self._map.astype(np.int16) * other, 0, 255).astype(np.uint8)
-            return self
+        # ------------------------------------------------------------------ #
+        # Cloning
+        # ------------------------------------------------------------------ #
+        @staticmethod
+        def _copy_shape(s: dict) -> dict:
+            ns = dict(s)
+            if s.get('type') == 'raster':
+                ns['mask'] = s['mask'].copy()
+            else:
+                ns['contours'] = [c.copy() for c in s.get('contours', [])]
+                ns['holes'] = [c.copy() for c in s.get('holes', [])]
+            return ns
 
-        def div(self, other: 'Field' or float) -> 'Field':
-            """Divide this Field by another Field or scalar.
-
-            Parameters:
-                other (Field or float): Field or scalar divisor.
-
-            Returns:
-                Field: The updated Field object.
-            """
-            if isinstance(other, Field):
-                return self.div(other.get_map())
-            self._map = np.clip(self._map.astype(np.int16) / other, 0, 255).astype(np.uint8)
-            return self
-
-        def __add__(self, other: 'Field' or float) -> 'Field':
-            """Return a new Field representing this + other.
-
-            Parameters:
-                other (Field or float): Field or scalar value to add.
-
-            Returns:
-                Field: A new Field with the result.
-            """
-            with _profile("field.__add__"):
-                # Fast clone — Field only carries _map and inverted.
-                # copy.deepcopy is ~5-10x slower because it recursively traverses everything.
-                clone = self.__class__.__new__(self.__class__)
-                clone._map = self._map.copy()
-                clone.inverted = self.inverted
-                return clone.add(other)
-
-        def __sub__(self, other: 'Field' or float) -> 'Field':
-            """Return a new Field representing this - other.
-
-            Parameters:
-                other (Field or float): Field or scalar value to subtract.
-
-            Returns:
-                Field: A new Field with the result.
-            """
-            return self.__add__(other * -1)
-
-        def __mul__(self, other: 'Field' or float) -> 'Field':
-            """Return a new Field representing this * other.
-
-            Parameters:
-                other (Field or float): Field or scalar multiplier.
-
-            Returns:
-                Field: A new Field with the result.
-            """
-            clone = copy.deepcopy(self)
-            return clone.mult(other)
-
-        def __truediv__(self, other: 'Field' or float) -> 'Field':
-            """Return a new Field representing this / other.
-
-            Parameters:
-                other (Field or float): Field or scalar divisor.
-
-            Returns:
-                Field: A new Field with the result.
-            """
-            clone = copy.deepcopy(self)
-            clone.set_map(np.clip(self._map.astype(np.float16) / other, 0, 255).astype(np.uint8))
+        def _clone(self) -> 'Field':
+            """Fast, independent copy (deepcopy is far slower for our small state)."""
+            clone = self.__class__.__new__(self.__class__)
+            clone.shapes = [self._copy_shape(s) for s in self.shapes]
+            clone.blur_amount = self.blur_amount
+            clone.feather_amount = self.feather_amount
+            clone.inverted = self.inverted
+            clone._ref_w = self._ref_w
+            clone._ref_h = self._ref_h
+            clone._cache = {}
+            clone._device_cache = {}
             return clone
 
-        def invert(self) -> 'Field':
-            """Invert the field, flipping 0s to 255s and vice versa.
+        def _bump(self) -> None:
+            """Invalidate cached rasterizations after any mutation to shape or effects."""
+            if self._cache:
+                self._cache.clear()
+            if self._device_cache:
+                self._device_cache.clear()
 
-            Returns:
-                Field: The updated Field object.
+        @staticmethod
+        def _scalar_value(other):
+            """Return a float if ``other`` is a scalar, else None."""
+            if isinstance(other, bool):
+                return None
+            if isinstance(other, (int, float)):
+                return float(other)
+            if hasattr(other, 'ndim') and getattr(other, 'ndim', None) == 0:
+                try:
+                    return float(other)
+                except Exception:
+                    return None
+            if rnp.isscalar(other):
+                try:
+                    return float(other)
+                except Exception:
+                    return None
+            return None
+
+        def _is_pure(self) -> bool:
+            """True if no render-time effects are baked in (safe to union by reference)."""
+            return (not self.inverted) and (not self.blur_amount) and (not self.feather_amount)
+
+        # ------------------------------------------------------------------ #
+        # Rasterization (the only place a bitmap is produced)
+        # ------------------------------------------------------------------ #
+        @staticmethod
+        def _scaled_int(contour, sx, sy):
+            pts = rnp.asarray(contour, dtype=rnp.float32).reshape(-1, 2)
+            pts = pts * rnp.array([sx, sy], dtype=rnp.float32)
+            return rnp.round(pts).astype(rnp.int32)
+
+        @staticmethod
+        def _feather_mask(mask, amount):
+            a = float(amount)
+            if a <= 0:
+                return mask
+            binary = (mask > 0.004).astype(rnp.uint8)
+            if int(binary.max()) == 0:
+                return mask
+            dist = cv2.distanceTransform(binary, cv2.DIST_L2, 3)
+            ramp = rnp.clip(dist / a, 0.0, 1.0).astype(rnp.float32)
+            return (mask * ramp).astype(rnp.float32)
+
+        @staticmethod
+        def _blur_mask(mask, amount):
+            k = int(round(float(amount)))
+            if k <= 1:
+                return mask
+            if k % 2 == 0:
+                k += 1
+            return cv2.GaussianBlur(mask.astype(rnp.float32), (k, k), 0)
+
+        def _rasterize(self, height: int, width: int):
+            """Render the field's shapes to a CPU float32 mask in [0, 1]."""
+            height = int(height)
+            width = int(width)
+
+            # Legacy fallback: support custom fields that still assign a raw self._map.
+            if not self.shapes:
+                legacy = getattr(self, '_map', None)
+                if legacy is not None:
+                    m = legacy.get() if hasattr(legacy, 'get') else rnp.asarray(legacy)
+                    m = m.astype(rnp.float32)
+                    if m.ndim == 3:
+                        m = m[..., 0]
+                    if float(m.max() if m.size else 0) > 1.0001:
+                        m = m / 255.0
+                    if m.shape[0] != height or m.shape[1] != width:
+                        m = cv2.resize(m, (width, height), interpolation=cv2.INTER_LINEAR)
+                    if self.inverted:
+                        m = 1.0 - m
+                    return rnp.clip(m, 0.0, 1.0).astype(rnp.float32)
+
+            key = (height, width)
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
+
+            ref_w = self._ref_w if self._ref_w else width
+            ref_h = self._ref_h if self._ref_h else height
+            sx = width / float(ref_w)
+            sy = height / float(ref_h)
+
+            acc = rnp.zeros((height, width), dtype=rnp.float32)
+            for s in self.shapes:
+                if s.get('type') == 'raster':
+                    m = s['mask']
+                    m = m.get() if hasattr(m, 'get') else rnp.asarray(m)
+                    if m.shape[0] != height or m.shape[1] != width:
+                        m = cv2.resize(m.astype(rnp.float32), (width, height), interpolation=cv2.INTER_LINEAR)
+                    layer = m.astype(rnp.float32)
+                else:
+                    layer8 = rnp.zeros((height, width), dtype=rnp.uint8)
+                    cnts = [self._scaled_int(c, sx, sy) for c in s.get('contours', [])]
+                    cnts = [c for c in cnts if len(c) >= 3]
+                    if cnts:
+                        cv2.fillPoly(layer8, cnts, 255)
+                    holes = [self._scaled_int(c, sx, sy) for c in s.get('holes', [])]
+                    holes = [c for c in holes if len(c) >= 3]
+                    if holes:
+                        cv2.fillPoly(layer8, holes, 0)
+                    layer = layer8.astype(rnp.float32) / 255.0
+
+                v = float(s.get('value', 1.0))
+                if v != 1.0:
+                    layer = layer * v
+                if s.get('additive', True):
+                    acc += layer
+                else:
+                    acc -= layer
+
+            rnp.clip(acc, 0.0, 1.0, out=acc)
+
+            if self.feather_amount and self.feather_amount > 0:
+                acc = self._feather_mask(acc, self.feather_amount * sx)
+            if self.blur_amount and self.blur_amount > 0:
+                acc = self._blur_mask(acc, self.blur_amount * sx)
+            if self.inverted:
+                acc = 1.0 - acc
+
+            if len(self._cache) > 8:
+                self._cache.clear()
+            self._cache[key] = acc
+            return acc
+
+        # ------------------------------------------------------------------ #
+        # Combination operations
+        # ------------------------------------------------------------------ #
+        def _bake_self(self) -> 'Field':
+            """Flatten this field's shapes + effects into a single raster shape.
+
+            After this the field's geometry and its (formerly reversible) effects
+            are fused into one mask, so anything composited on top is unaffected
+            by those effects.
             """
-            self._map = 255 - self._map
-            self.inverted = not self.inverted
+            base = self._rasterize(self._ref_h, self._ref_w)
+            self.shapes = [{'type': 'raster', 'mask': base.astype(rnp.float32),
+                            'value': 1.0, 'additive': True}]
+            self.blur_amount = 0.0
+            self.feather_amount = 0.0
+            self.inverted = False
+            self._bump()
             return self
 
-        def move(self, dx: int, dy: int) -> 'Field':
-            """Translate the field by (dx, dy) using an affine transform.
+        def _absorb(self, other, additive: bool) -> 'Field':
+            """Combine ``other`` into this field (union if additive, else difference).
 
-            Parameters:
-                dx (int): Horizontal shift (positive is right).
-                dy (int): Vertical shift (positive is down).
-
-            Returns:
-                Field: The updated Field object.
-
-            Raises:
-                ValueError: If the image exceeds OpenCV's size limits.
+            Fields carry their own (reversible) blur/feather/invert effects, so two
+            fields with different looks can't simply share raw geometry. When this
+            field already has effects baked in, it is flattened first and the
+            other's *rendered* mask is composited on top — matching the old bitmap
+            behaviour where each mask kept its own appearance.
             """
-            height, width = self._map.shape[:2]
+            sv = self._scalar_value(other)
+            if sv is not None:
+                if not self._is_pure():
+                    self._bake_self()
+                self.shapes.append(self._fullcanvas_shape(sv, additive))
+                return self
 
-            if width >= 32000 or height >= 32000:
-                raise ValueError("Image too large for OpenCV warpAffine.")
+            if isinstance(other, Field):
+                if additive and self._is_pure() and other._is_pure():
+                    # Pure geometry on both sides: union losslessly by copying shapes.
+                    for s in other.shapes:
+                        ns = self._copy_shape(s)
+                        self._rescale_shape(ns, other._ref_w, other._ref_h, self._ref_w, self._ref_h)
+                        self.shapes.append(ns)
+                else:
+                    # Effects present (or subtraction): composite rendered masks so
+                    # each field keeps its own look.
+                    if not self._is_pure():
+                        self._bake_self()
+                    m = other.get_map(self._ref_h, self._ref_w)
+                    self.shapes.append(self._raster_shape(m, additive))
+                return self
 
-            # 1. BRIDGE TO CPU
-            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
+            # Raw array map (e.g. another field's get_map()).
+            if hasattr(other, 'shape'):
+                if not self._is_pure():
+                    self._bake_self()
+                m = other.get() if hasattr(other, 'get') else rnp.asarray(other)
+                m = m.astype(rnp.float32)
+                if m.ndim == 3:
+                    m = m[..., 0]
+                if float(m.max() if m.size else 0) > 1.0001:
+                    m = m / 255.0
+                self.shapes.append(self._raster_shape(m, additive))
+                return self
 
-            translation_matrix = np.float32([[1, 0, dx], [0, 1, dy]])
-            moved = cv2.warpAffine(
-                map_cpu, translation_matrix, (width, height),
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=255 if self.inverted else 0
-            )
+            raise TypeError(f"Cannot combine Field with {type(other)!r}.")
 
-            # 2. BRIDGE TO GPU
-            self._map = np.asarray(moved)
-            return self
-
-        def resize(self, width_or_scale: int or float, height: int = None) -> 'Field':
-            """Resize the field to specific dimensions or by a scale factor.
-
-            Parameters:
-                width_or_scale (int or float): Target width or a scale factor.
-                height (int, optional): Target height (only if resizing by explicit dimensions).
-
-            Returns:
-                Field: The resized Field object.
-            """
-            if isinstance(width_or_scale, (int, float)) and height is None:
-                scale = width_or_scale
-                width = int(self._map.shape[1] * scale)
-                height = int(self._map.shape[0] * scale)
+        @staticmethod
+        def _rescale_shape(s: dict, from_w, from_h, to_w, to_h) -> dict:
+            if from_w == to_w and from_h == to_h:
+                return s
+            if s.get('type') == 'raster':
+                s['mask'] = cv2.resize(s['mask'], (int(to_w), int(to_h)), interpolation=cv2.INTER_LINEAR)
             else:
-                width = int(width_or_scale)
-                height = int(height)
+                f = rnp.array([to_w / float(from_w), to_h / float(from_h)], dtype=rnp.float32)
+                s['contours'] = [c * f for c in s['contours']]
+                s['holes'] = [c * f for c in s['holes']]
+            return s
 
-            fill_value = 255 if self.inverted else 0
-
-            # 1. BRIDGE TO CPU
-            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
-
-            if width > map_cpu.shape[1] or height > map_cpu.shape[0]:
-                # FIX: Explicitly import standard numpy locally to bypass any global CuPy aliases
-                import numpy as standard_np
-                new_map = standard_np.full((height, width), fill_value, dtype=standard_np.uint8)
-
-                overlap_x_end = min(map_cpu.shape[1], width)
-                overlap_y_end = min(map_cpu.shape[0], height)
-                new_map[:overlap_y_end, :overlap_x_end] = map_cpu[:overlap_y_end, :overlap_x_end]
-
-                # 2. BRIDGE TO GPU
-                self._map = np.asarray(new_map)
+        def _bake_combine(self, other, divide: bool) -> 'Field':
+            """Multiply/divide by another field or map by baking to a raster shape."""
+            base = self._rasterize(self._ref_h, self._ref_w)
+            if isinstance(other, Field):
+                om = other.get_map(self._ref_h, self._ref_w)
             else:
-                resized = cv2.resize(map_cpu, (width, height), interpolation=cv2.INTER_AREA)
-
-                # 2. BRIDGE TO GPU
-                self._map = np.asarray(resized)
-
+                om = other
+            om = om.get() if hasattr(om, 'get') else rnp.asarray(om)
+            om = om.astype(rnp.float32)
+            if om.ndim == 3:
+                om = om[..., 0]
+            if float(om.max() if om.size else 0) > 1.0001:
+                om = om / 255.0
+            if om.shape[0] != self._ref_h or om.shape[1] != self._ref_w:
+                om = cv2.resize(om, (self._ref_w, self._ref_h), interpolation=cv2.INTER_LINEAR)
+            if divide:
+                om = rnp.where(om <= 1e-6, 1e-6, om)
+                res = rnp.clip(base / om, 0.0, 1.0)
+            else:
+                res = rnp.clip(base * om, 0.0, 1.0)
+            # Effects are now baked into the raster; reset them.
+            self.shapes = [{'type': 'raster', 'mask': res.astype(rnp.float32),
+                            'value': 1.0, 'additive': True}]
+            self.blur_amount = 0.0
+            self.feather_amount = 0.0
+            self.inverted = False
+            self._bump()
             return self
 
-        def scale(self, scale_x: float, scale_y: float = None) -> 'Field':
-            """Scale the field by a factor along the x and y axes.
+        def add(self, other) -> 'Field':
+            """Add another Field, a raw map, or a scalar to this Field (in place)."""
+            self._absorb(other, True)
+            self._bump()
+            return self
+
+        def sub(self, other) -> 'Field':
+            """Subtract another Field, a raw map, or a scalar from this Field (in place)."""
+            self._absorb(other, False)
+            self._bump()
+            return self
+
+        def mult(self, other) -> 'Field':
+            """Multiply this Field by a scalar (scales intensity) or another Field (in place)."""
+            sv = self._scalar_value(other)
+            if sv is not None:
+                for s in self.shapes:
+                    s['value'] = s.get('value', 1.0) * sv
+                self._bump()
+                return self
+            return self._bake_combine(other, divide=False)
+
+        def div(self, other) -> 'Field':
+            """Divide this Field by a scalar or another Field (in place)."""
+            sv = self._scalar_value(other)
+            if sv is not None:
+                if sv == 0:
+                    raise ValueError("Cannot divide a Field by zero.")
+                for s in self.shapes:
+                    s['value'] = s.get('value', 1.0) / sv
+                self._bump()
+                return self
+            return self._bake_combine(other, divide=True)
+
+        def __add__(self, other) -> 'Field':
+            with _profile("field.__add__"):
+                return self._clone().add(other)
+
+        def __sub__(self, other) -> 'Field':
+            return self._clone().sub(other)
+
+        def __mul__(self, other) -> 'Field':
+            return self._clone().mult(other)
+
+        def __truediv__(self, other) -> 'Field':
+            return self._clone().div(other)
+
+        # ------------------------------------------------------------------ #
+        # Geometry transforms (lossless – operate on the vector shapes)
+        # ------------------------------------------------------------------ #
+        def _content_points(self):
+            pts = []
+            for s in self.shapes:
+                if s.get('type') == 'poly':
+                    for c in s['contours']:
+                        pts.append(rnp.asarray(c, dtype=rnp.float32).reshape(-1, 2))
+                    for c in s['holes']:
+                        pts.append(rnp.asarray(c, dtype=rnp.float32).reshape(-1, 2))
+            if pts:
+                return rnp.concatenate(pts, axis=0)
+            return None
+
+        def _content_bbox(self):
+            pts = self._content_points()
+            if pts is not None and len(pts):
+                x0, y0 = pts.min(axis=0)
+                x1, y1 = pts.max(axis=0)
+                return float(x0), float(y0), float(x1), float(y1)
+            for s in self.shapes:
+                if s.get('type') == 'raster':
+                    ys, xs = rnp.where(s['mask'] > 0.004)
+                    if len(xs):
+                        return float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
+            return None
+
+        def _content_center(self):
+            bbox = self._content_bbox()
+            if bbox is None:
+                return self._ref_w / 2.0, self._ref_h / 2.0
+            x0, y0, x1, y1 = bbox
+            return (x0 + x1) / 2.0, (y0 + y1) / 2.0
+
+        def move(self, dx: float, dy: float) -> 'Field':
+            """Translate the field by (dx, dy) pixels."""
+            off = rnp.array([float(dx), float(dy)], dtype=rnp.float32)
+            for s in self.shapes:
+                if s.get('type') == 'raster':
+                    M = rnp.float32([[1, 0, float(dx)], [0, 1, float(dy)]])
+                    s['mask'] = cv2.warpAffine(s['mask'], M, (self._ref_w, self._ref_h),
+                                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                else:
+                    s['contours'] = [c + off for c in s['contours']]
+                    s['holes'] = [c + off for c in s['holes']]
+            self._bump()
+            return self
+
+        def resize(self, scale: float) -> 'Field':
+            """Scale the field by ``scale``, anchored at its own center.
 
             Parameters:
-                scale_x (float): Scaling factor for width.
-                scale_y (float, optional): Scaling factor for height (defaults to scale_x if None).
-
-            Returns:
-                Field: The scaled Field object.
-
-            Raises:
-                ValueError: If any scale factor is non-positive.
+                scale (float): Scale factor (>1 grows, <1 shrinks). The shape's
+                    center stays put while it grows/shrinks around it.
             """
-            if scale_x <= 0 or (scale_y is not None and scale_y <= 0):
-                raise ValueError("Scale factors must be positive.")
-
-            if scale_y is None:
-                scale_y = scale_x
-
-            # 1. BRIDGE TO CPU
-            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
-
-            new_width = int(map_cpu.shape[1] * scale_x)
-            new_height = int(map_cpu.shape[0] * scale_y)
-            scaled = cv2.resize(map_cpu, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-
-            # 2. BRIDGE TO GPU
-            self._map = np.asarray(scaled)
+            scale = float(scale)
+            if scale <= 0:
+                raise ValueError("Resize scale must be positive.")
+            cx, cy = self._content_center()
+            center = rnp.array([cx, cy], dtype=rnp.float32)
+            for s in self.shapes:
+                if s.get('type') == 'raster':
+                    M = cv2.getRotationMatrix2D((float(cx), float(cy)), 0.0, scale)
+                    s['mask'] = cv2.warpAffine(s['mask'], M, (self._ref_w, self._ref_h),
+                                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                else:
+                    s['contours'] = [((c - center) * scale + center) for c in s['contours']]
+                    s['holes'] = [((c - center) * scale + center) for c in s['holes']]
+            self._bump()
             return self
 
         def fit(self) -> 'Field':
-            """Stretch the region containing active values to fill the canvas.
-
-            Returns:
-                Field: The updated Field object.
-            """
-            target_value = 0 if self.inverted else 255
-
-            # 1. BRIDGE TO CPU
-            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
-
-            coords = cv2.findNonZero((map_cpu == target_value).astype(np.uint8))
-
-            if coords is None:
+            """Stretch the field's bounding box to fill the whole canvas."""
+            bbox = self._content_bbox()
+            if bbox is None:
                 return self
-
-            x, y, w, h = cv2.boundingRect(coords)
-            roi = map_cpu[y:y+h, x:x+w]
-            resized_roi = cv2.resize(roi, (map_cpu.shape[1], map_cpu.shape[0]), interpolation=cv2.INTER_LINEAR)
-
-            if not self.inverted:
-                resized_roi[resized_roi != 255] = 0
-            else:
-                resized_roi[resized_roi != 0] = 255
-
-            # 2. BRIDGE TO GPU
-            self._map = np.asarray(resized_roi)
+            x0, y0, x1, y1 = bbox
+            bw = max(x1 - x0, 1e-6)
+            bh = max(y1 - y0, 1e-6)
+            sx = self._ref_w / bw
+            sy = self._ref_h / bh
+            origin = rnp.array([x0, y0], dtype=rnp.float32)
+            factor = rnp.array([sx, sy], dtype=rnp.float32)
+            for s in self.shapes:
+                if s.get('type') == 'raster':
+                    M = rnp.float32([[sx, 0, -x0 * sx], [0, sy, -y0 * sy]])
+                    s['mask'] = cv2.warpAffine(s['mask'], M, (self._ref_w, self._ref_h))
+                else:
+                    s['contours'] = [((c - origin) * factor) for c in s['contours']]
+                    s['holes'] = [((c - origin) * factor) for c in s['holes']]
+            self._bump()
             return self
 
+        def mirror_x(self) -> 'Field':
+            """Mirror the field along the vertical (X) axis."""
+            w = self._ref_w
+            for s in self.shapes:
+                if s.get('type') == 'raster':
+                    s['mask'] = cv2.flip(s['mask'], 1)
+                else:
+                    for c in s['contours']:
+                        c[:, 0] = w - c[:, 0]
+                    for c in s['holes']:
+                        c[:, 0] = w - c[:, 0]
+            self._bump()
+            return self
+
+        def mirror_y(self) -> 'Field':
+            """Mirror the field along the horizontal (Y) axis."""
+            h = self._ref_h
+            for s in self.shapes:
+                if s.get('type') == 'raster':
+                    s['mask'] = cv2.flip(s['mask'], 0)
+                else:
+                    for c in s['contours']:
+                        c[:, 1] = h - c[:, 1]
+                    for c in s['holes']:
+                        c[:, 1] = h - c[:, 1]
+            self._bump()
+            return self
+
+        def invert(self) -> 'Field':
+            """Invert the field (everything except the shape). Reversible."""
+            self.inverted = not self.inverted
+            self._bump()
+            return self
+
+        # ------------------------------------------------------------------ #
+        # Reversible render-time effects
+        # ------------------------------------------------------------------ #
+        def blur(self, amount=5) -> 'Field':
+            """Set the (reversible) blur amount in pixels. ``amount`` may also be a
+            kernel tuple like ``(5, 5)`` for backwards compatibility. Use
+            ``unblur()`` or ``blur(0)`` to remove it without touching the shape."""
+            if isinstance(amount, (tuple, list)):
+                amount = max(amount) if len(amount) else 0
+            self.blur_amount = float(amount)
+            self._bump()
+            return self
+
+        def feather(self, amount=5) -> 'Field':
+            """Set the (reversible) feather amount in pixels (fades edges inward).
+            Use ``unfeather()`` or ``feather(0)`` to remove it."""
+            if isinstance(amount, (tuple, list)):
+                amount = max(amount) if len(amount) else 0
+            self.feather_amount = float(amount)
+            self._bump()
+            return self
+
+        def unblur(self) -> 'Field':
+            """Remove blur, restoring the crisp underlying shape."""
+            self.blur_amount = 0.0
+            self._bump()
+            return self
+
+        def unfeather(self) -> 'Field':
+            """Remove feathering, restoring hard edges."""
+            self.feather_amount = 0.0
+            self._bump()
+            return self
+
+        # ------------------------------------------------------------------ #
+        # Sampling / output
+        # ------------------------------------------------------------------ #
+        def get(self, x: int, y: int) -> float:
+            """Sample the (rasterized) normalized value at a coordinate, in [0, 1]."""
+            m = self._rasterize(self._ref_h, self._ref_w)
+            yy, xx = int(y), int(x)
+            if 0 <= yy < m.shape[0] and 0 <= xx < m.shape[1]:
+                return float(m[yy, xx])
+            return 0.0
+
         def preview(self, wait_for_exit: bool = False, title: str = "Field Preview") -> None:
-            """Display the field using OpenCV.
-
-            Parameters:
-                wait_for_exit (bool): Whether to wait for a user key press before exiting.
-                title (str): Title of the display window.
-            """
-            window_name = title
-
-            # 1. BRIDGE TO CPU (Read-only, no need to push back to GPU)
-            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
-
-            cv2.imshow(window_name, map_cpu)
+            """Display the rasterized field using OpenCV."""
+            m = self._rasterize(self._ref_h, self._ref_w)
+            img = (rnp.clip(m, 0.0, 1.0) * 255).astype(rnp.uint8)
+            cv2.imshow(title, img)
             if wait_for_exit:
-                while cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1:
+                while cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE) >= 1:
                     if cv2.waitKey(100) & 0xFF == ord('q'):
                         break
             else:
                 cv2.waitKey(1)
 
-        def get_map(self) -> np.ndarray:
-            """Get the normalized field map.
-
-            Returns:
-                np.ndarray: The map normalized to [0, 1].
-            """
-            return self._map.astype(np.float16) / 255
-
-        def set_map(self, map: np.ndarray) -> None:
-            """Set the internal map.
+        def get_map(self, height: int = None, width: int = None) -> np.ndarray:
+            """Rasterize the field to a normalized [0, 1] bitmap.
 
             Parameters:
-                map (np.ndarray): New map data (must match expected shape).
-            """
-            self._map = map
-
-        def blur(self, param: tuple = (5, 5)) -> 'Field':
-            """Apply a blur to the field.
-
-            Parameters:
-                param (tuple): Kernel size for blurring.
+                height (int, optional): Target height. Defaults to the renderer's.
+                width (int, optional): Target width. Defaults to the renderer's.
 
             Returns:
-                Field: The blurred Field object.
+                np.ndarray: A (height, width) float32 map in [0, 1]. Because the
+                field is vector-based, it is rasterized at whatever resolution is
+                requested, so it always matches the pixels it will be applied to.
             """
-            # 1. BRIDGE TO CPU
-            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
-
-            blurred = cv2.blur(map_cpu, param)
-
-            # 2. BRIDGE TO GPU
-            self._map = np.asarray(blurred)
-            return self
-
-        def mirror_x(self) -> 'Field':
-            """Mirror the field along the vertical (X) axis.
-
-            Returns:
-                Field: The mirrored Field object.
-            """
-            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
-            mirrored = cv2.flip(map_cpu, 1)
-            self._map = np.asarray(mirrored)
-            return self
-
-        def mirror_y(self) -> 'Field':
-            """Mirror the field along the horizontal (Y) axis.
-
-            Returns:
-                Field: The mirrored Field object.
-            """
-            map_cpu = self._map.get() if hasattr(self._map, 'get') else self._map
-            mirrored = cv2.flip(map_cpu, 0)
-            self._map = np.asarray(mirrored)
-            return self
-
-        def crop(self, top_left: tuple, bottom_right: tuple) -> 'Field':
-            """Crop the field to a rectangle defined by two points.
-
-            Parameters:
-                top_left (tuple): (x, y) coordinates for the top-left corner.
-                bottom_right (tuple): (x, y) coordinates for the bottom-right corner.
-
-            Returns:
-                Field: The cropped Field object.
-            """
-            x1, y1 = map(int, top_left)
-            x2, y2 = map(int, bottom_right)
-
-            x1, x2 = max(0, min(x1, self._map.shape[1])), max(0, min(x2, self._map.shape[1]))
-            y1, y2 = max(0, min(y1, self._map.shape[0])), max(0, min(y2, self._map.shape[0]))
-
-            if x1 > x2:
-                x1, x2 = x2, x1
-            if y1 > y2:
-                y1, y2 = y2, y1
-
-            self._map = self._map[y1:y2, x1:x2]
-            return self
+            if height is None:
+                height = renderer.height()
+            if width is None:
+                width = renderer.width()
+            height = int(height)
+            width = int(width)
+            key = (height, width)
+            cached = self._device_cache.get(key)
+            if cached is not None:
+                return cached
+            dm = np.asarray(self._rasterize(height, width))
+            if len(self._device_cache) > 8:
+                self._device_cache.clear()
+            self._device_cache[key] = dm
+            return dm
 
 
     class FOverlay(Field):
         def __init__(self, opacity: float = 1.0) -> None:
-            """Initialize an FOverlay object with a uniform opacity field.
-
-            The overlay is initialized to a constant opacity across the entire canvas.
-            Opacity should be a value between 0 (fully transparent) and 1 (fully opaque).
-
-            Parameters:
-                opacity (float, optional): Initial opacity value for the overlay.
-                    Defaults to 1.0 (fully opaque).
-
-            Raises:
-                ValueError: If opacity is not within the range [0, 1].
-            """
+            """A uniform whole-canvas field at the given opacity (0..1)."""
             if not (0.0 <= opacity <= 1.0):
                 raise ValueError(f"Opacity must be between 0 and 1, but got {opacity}.")
-
             super().__init__()
-            self._map = np.full(
-                (renderer.height(), renderer.width()),
-                int(opacity * 255),
-                dtype=np.uint8
-            )
+            self.shapes.append(self._fullcanvas_shape(float(opacity), True))
+
 
     class FLine(Field):
         def __init__(self, x1: float, y1: float, x2: float, y2: float, thickness: float) -> None:
-            """Initialize an FLine object that draws a straight line on the field.
-
-            Creates a binary line between two points with a specified thickness.
-            The line is drawn onto the field's internal map immediately upon initialization.
-
-            Parameters:
-                x1 (float): X-coordinate of the start point.
-                y1 (float): Y-coordinate of the start point.
-                x2 (float): X-coordinate of the end point.
-                y2 (float): Y-coordinate of the end point.
-                thickness (float): Thickness of the line in pixels.
-
-            Raises:
-                ValueError: If thickness is not a positive number.
-            """
+            """A straight line of the given thickness, stored as a vector rectangle."""
             if thickness <= 0:
                 raise ValueError(f"Thickness must be a positive number, but got {thickness}.")
-
             super().__init__()
-
-            # Safely draw on CPU
-            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
-            cv2.line(
-                map_cpu,
-                (int(x1), int(y1)),
-                (int(x2), int(y2)),
-                color=255,
-                thickness=int(thickness)
-            )
-            # Push back to GPU
-            self._map = np.asarray(map_cpu)
+            x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+            half = float(thickness) / 2.0
+            dx, dy = x2 - x1, y2 - y1
+            length = (dx * dx + dy * dy) ** 0.5
+            if length < 1e-6:
+                contour = rnp.array([
+                    [x1 - half, y1 - half], [x1 + half, y1 - half],
+                    [x1 + half, y1 + half], [x1 - half, y1 + half],
+                ], dtype=rnp.float32)
+            else:
+                ux, uy = dx / length, dy / length
+                nx, ny = -uy * half, ux * half
+                contour = rnp.array([
+                    [x1 + nx, y1 + ny], [x2 + nx, y2 + ny],
+                    [x2 - nx, y2 - ny], [x1 - nx, y1 - ny],
+                ], dtype=rnp.float32)
+            self._add_poly([contour])
 
 
     class FRect(Field):
         def __init__(self, x1: float, y1: float, x2: float, y2: float, thickness: int = -1) -> None:
-            """Initialize an FRect object that draws a rectangle on the field.
-
-            Creates a rectangle between two points, with customizable thickness.
-            By default, the rectangle is filled if thickness is set to -1.
-
-            Parameters:
-                x1 (float): X-coordinate of the top-left corner.
-                y1 (float): Y-coordinate of the top-left corner.
-                x2 (float): X-coordinate of the bottom-right corner.
-                y2 (float): Y-coordinate of the bottom-right corner.
-                thickness (int, optional): Thickness of the rectangle border.
-                    - Set to -1 to fill the rectangle. Defaults to -1.
-
-            Raises:
-                ValueError: If thickness is not -1 and is less than or equal to 0.
-            """
+            """A rectangle. ``thickness == -1`` fills it; otherwise draws a border ring."""
             if thickness != -1 and thickness <= 0:
                 raise ValueError(f"Thickness must be a positive number or -1 to fill, but got {thickness}.")
-
             super().__init__()
+            x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+            ax, bx = min(x1, x2), max(x1, x2)
+            ay, by = min(y1, y2), max(y1, y2)
+            if thickness == -1:
+                self._add_poly([self._rect_pts(ax, ay, bx, by)])
+            else:
+                h = float(thickness) / 2.0
+                outer = self._rect_pts(ax - h, ay - h, bx + h, by + h)
+                ix1, iy1, ix2, iy2 = ax + h, ay + h, bx - h, by - h
+                holes = [self._rect_pts(ix1, iy1, ix2, iy2)] if (ix2 > ix1 and iy2 > iy1) else None
+                self._add_poly([outer], holes=holes)
 
-            # Safely draw on CPU
-            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
-            cv2.rectangle(
-                map_cpu,
-                (int(x1), int(y1)),
-                (int(x2), int(y2)),
-                color=255,
-                thickness=int(thickness)
-            )
-            # Push back to GPU
-            self._map = np.asarray(map_cpu)
+        @staticmethod
+        def _rect_pts(ax, ay, bx, by):
+            return rnp.array([[ax, ay], [bx, ay], [bx, by], [ax, by]], dtype=rnp.float32)
 
 
     class FEllipse(Field):
         def __init__(
                 self,
-                center: tuple[float, float],
+                center: tuple,
                 ellipse_width: float,
                 ellipse_height: float,
                 angle: float = 0,
                 thickness: int = -1
         ) -> None:
-            """Initialize an FEllipse object that draws an ellipse on the field.
-
-            Creates an ellipse centered at a given point with specified width, height,
-            rotation angle, and border thickness. By default, the ellipse is filled
-            if thickness is set to -1.
-
-            Parameters:
-                center (tuple[float, float]): (x, y) coordinates for the center of the ellipse.
-                ellipse_width (float): Total width of the ellipse's bounding box.
-                ellipse_height (float): Total height of the ellipse's bounding box.
-                angle (float, optional): Rotation angle of the ellipse in degrees.
-                    Defaults to 0 (no rotation).
-                thickness (int, optional): Thickness of the ellipse border.
-                    - Set to -1 to fill the ellipse (default).
-
-            Raises:
-                ValueError: If thickness is not -1 and is less than or equal to 0.
-            """
+            """An ellipse, approximated as a vector polygon (filled or a border ring)."""
             if thickness != -1 and thickness <= 0:
                 raise ValueError(f"Thickness must be a positive number or -1 to fill, but got {thickness}.")
-
             super().__init__()
-
-            # Convert total width and height into semi-axes
-            axes = (int(ellipse_width // 2), int(ellipse_height // 2))
-
-            # Safely draw on CPU
-            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
-            cv2.ellipse(
-                map_cpu,
-                (int(center[0]), int(center[1])),
-                axes,
-                angle,
-                0, 360,  # Cover the full 360 degrees
-                255,     # White color
-                thickness
-            )
-            # Push back to GPU
-            self._map = np.asarray(map_cpu)
+            cx, cy = int(center[0]), int(center[1])
+            ax = max(int(ellipse_width // 2), 1)
+            ay = max(int(ellipse_height // 2), 1)
+            ang = int(angle)
+            if thickness == -1:
+                pts = cv2.ellipse2Poly((cx, cy), (ax, ay), ang, 0, 360, 5)
+                self._add_poly([rnp.asarray(pts, dtype=rnp.float32)])
+            else:
+                h = int(thickness // 2)
+                outer = cv2.ellipse2Poly((cx, cy), (ax + h, ay + h), ang, 0, 360, 5)
+                inner = cv2.ellipse2Poly((cx, cy), (max(ax - h, 1), max(ay - h, 1)), ang, 0, 360, 5)
+                self._add_poly([rnp.asarray(outer, dtype=rnp.float32)],
+                               holes=[rnp.asarray(inner, dtype=rnp.float32)])
 
 
     class FPoly(Field):
         def __init__(self, points: np.ndarray) -> None:
-            """Initialize an FPoly object that draws a filled polygon on the field.
-
-            Takes a set of points and fills a polygon based on their coordinates.
-            The polygon will be drawn in white (value 255) onto the field map.
-
-            Parameters:
-                points (np.ndarray): A NumPy array of shape (N, 2) containing (x, y) coordinates
-                    for the vertices of the polygon.
-
-                    - N must be at least 3 to form a valid polygon.
-                    - Points are automatically reshaped as required by OpenCV.
-
-            Raises:
-                ValueError: If fewer than 3 points are provided.
-            """
-            if points.shape[0] < 3:
-                raise ValueError(f"A polygon requires at least 3 points, but received {points.shape[0]}.")
-
+            """A filled polygon from an array of (x, y) vertices."""
+            pts = points.get() if hasattr(points, 'get') else rnp.asarray(points)
+            pts = pts.reshape(-1, 2)
+            if pts.shape[0] < 3:
+                raise ValueError(f"A polygon requires at least 3 points, but received {pts.shape[0]}.")
             super().__init__()
-
-            # Safely pull the points array down to the CPU if it was created on the GPU
-            if hasattr(points, 'get'):
-                pts_cpu = points.get()
-            else:
-                pts_cpu = rnp.asarray(points)
-
-            # Reshape points to (N, 1, 2) as expected by OpenCV
-            pts_cpu = pts_cpu.reshape((-1, 1, 2)).astype(rnp.int32)
-
-            # Safely draw on CPU
-            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
-            cv2.fillPoly(map_cpu, [pts_cpu], color=255)
-
-            # Push back to GPU
-            self._map = np.asarray(map_cpu)
+            self._add_poly([pts.astype(rnp.float32)])
 
 
     class FText(Field):
@@ -2663,122 +3075,47 @@ if len(_paths) != 0:
                 thickness: int = 1,
                 custom_font: str = None
         ) -> None:
-            """Initialize an FText object that renders text onto the field map.
-
-            Allows rendering text either using a custom TrueType font (via Pillow) or using
-            OpenCV's built-in fonts. The text is automatically center-aligned based on the
-            provided position.
-
-            Parameters:
-                text (str): The text string to render.
-                position (tuple): A tuple (x, y) representing the center position for the text.
-                font_scale (float): Scale factor to size the text.
-                thickness (int, optional): Thickness of the text stroke (default is 1).
-                custom_font (str, optional): Path to a custom TTF font file.
-                    If None, OpenCV's default font is used.
-
-            Raises:
-                FileNotFoundError: If a custom font path is provided but the file cannot be found.
-            """
+            """Text, rendered once to a bitmap and then vectorized into contours."""
             super().__init__()
-
+            mask = rnp.zeros((self._ref_h, self._ref_w), dtype=rnp.uint8)
             if custom_font:
-                self._draw_with_pillow(text, position, font_scale, custom_font)
+                mask = self._draw_with_pillow(mask, text, position, font_scale, custom_font)
             else:
-                self._draw_with_opencv(text, position, font_scale, thickness)
+                mask = self._draw_with_opencv(mask, text, position, font_scale, thickness)
+            self._add_contours_from_mask(mask)
 
-        def _draw_with_pillow(
-                self,
-                text: str,
-                position: tuple,
-                font_scale: float,
-                custom_font: str
-        ) -> None:
-            """Render text using Pillow with a custom TrueType font.
-
-            Converts the internal field map to a Pillow image, draws the text,
-            and converts it back to a NumPy array.
-
-            Parameters:
-                text (str): Text to render.
-                position (tuple): Center position (x, y) for the text.
-                font_scale (float): Scale factor for the font size.
-                custom_font (str): Path to a .ttf font file.
-            """
-            # Create a blank CPU canvas so Pillow doesn't crash on CuPy arrays
-            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
-            pil_image = Image.fromarray(map_cpu)
+        def _draw_with_pillow(self, mask, text, position, font_scale, custom_font):
+            pil_image = Image.fromarray(mask)
             draw = ImageDraw.Draw(pil_image)
-
             try:
                 font_size = int(font_scale * 20)
                 font = ImageFont.truetype(custom_font, font_size)
             except IOError:
                 raise FileNotFoundError(f"Custom font file '{custom_font}' not found or could not be opened.")
-
-            text_bbox = font.getbbox(text)  # (left, top, right, bottom)
+            text_bbox = font.getbbox(text)
             text_width = text_bbox[2] - text_bbox[0]
             text_height = text_bbox[3] - text_bbox[1]
-
             bottom_left_x = int(position[0] - text_width / 2)
             bottom_left_y = int(position[1] - text_height / 2)
-
             draw.text((bottom_left_x, bottom_left_y), text, font=font, fill=255)
+            return rnp.array(pil_image)
 
-            # Push back to GPU
-            self._map = np.asarray(rnp.array(pil_image))
-
-        def _draw_with_opencv(
-                self,
-                text: str,
-                position: tuple,
-                font_scale: float,
-                thickness: int
-        ) -> None:
-            """Render text using OpenCV's built-in font.
-
-            Parameters:
-                text (str): Text to render.
-                position (tuple): Center position (x, y) for the text.
-                font_scale (float): Scale factor for the font size.
-                thickness (int): Stroke thickness for the text.
-            """
+        def _draw_with_opencv(self, mask, text, position, font_scale, thickness):
             (text_width, text_height), baseline = cv2.getTextSize(
                 text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
             )
-
             bottom_left_x = int(position[0] - text_width / 2)
             bottom_left_y = int(position[1] + text_height / 2)
-
-            # Safely draw on CPU
-            map_cpu = rnp.zeros((renderer.height(), renderer.width()), dtype=rnp.uint8)
             cv2.putText(
-                map_cpu,
-                text,
-                (bottom_left_x, bottom_left_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
-                255,
-                thickness,
-                lineType=cv2.LINE_AA
+                mask, text, (bottom_left_x, bottom_left_y),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, 255, thickness, lineType=cv2.LINE_AA
             )
-            # Push back to GPU
-            self._map = np.asarray(map_cpu)
+            return mask
 
 
     class FAudio(Field):
         def __init__(self, aud: FrameAudio, start: int = 0, end: int = None) -> None:
-            """Initialize an FAudio object to visualize the audio frame data on the field map.
-
-            This class generates a visualization of the audio frame's magnitudes within the
-            specified frequency range. It creates bars corresponding to the frequencies and
-            displays a volume indicator based on the RMS volume of the frame.
-
-            Parameters:
-                aud (FrameAudio): The FrameAudio object containing the audio data.
-                start (int, optional): The starting frequency in Hz (default is 0).
-                end (int, optional): The ending frequency in Hz. If None, uses the full range.
-            """
+            """Visualize an audio frame's spectrum as vector bars plus a volume bar."""
             super().__init__()
 
             try:
@@ -2803,7 +3140,7 @@ if len(_paths) != 0:
                 # Normalize the magnitudes for visualization
                 norm = max(mags) / renderer.height()
                 if norm == 0 or np.isnan(norm) or np.isinf(norm):
-                    return # Silent frame, leave map blank
+                    return  # Silent frame, leave the field empty
 
                 # Create the points for frequency bars
                 total_bars = end_idx - start_idx
@@ -2814,7 +3151,7 @@ if len(_paths) != 0:
                 points = []
 
                 for i in range(start_idx, end_idx):
-                    # FIX: Subtract start_idx so the first point is always drawn at x=0
+                    # Subtract start_idx so the first point is always drawn at x=0
                     x = (i - start_idx) * bar_width + bar_width / 2
                     y = renderer.height() - (mags[i] / norm)
                     points.extend([x, y])
@@ -2835,7 +3172,6 @@ if len(_paths) != 0:
                 print(f"Error in FAudio initialization: {ve}")
             except Exception as e:
                 print(f"Unexpected error initializing FAudio: {e}")
-
 
 
 class FDepth_Slice(Field):
@@ -2874,7 +3210,14 @@ class FDepth_Slice(Field):
 
 if len(_paths) != 0:
     class Filter:
-        """A filter that aligns a Field object with the current renderer dimensions."""
+        """A filter that masks an effect through a vector-based Field.
+
+        Filters no longer pre-bake a fixed-resolution mask. Instead they hold a
+        reference to a :class:`Field` and rasterize it on demand at the *exact*
+        resolution of the pixels being processed (via ``apply_to``). This keeps
+        the mask aligned with the frame no matter what ``dx`` / preview scaling
+        the renderer is using, so the old broadcasting mismatches can't happen.
+        """
 
         def __init_subclass__(cls, **kwargs):
             super().__init_subclass__(**kwargs)
@@ -2896,58 +3239,56 @@ if len(_paths) != 0:
             self.set_field(field)
 
         def set_field(self, field: Field) -> 'Filter':
-            """Set a new Field and crop its map to match the renderer dimensions.
+            """Set the Field that masks this filter.
+
+            The field is stored by reference and is rasterized lazily, so no map
+            is computed here. The last resolved mask is invalidated.
 
             Parameters:
-                field (Field): The Field object containing the source map.
+                field (Field): The Field object providing the mask.
 
             Returns:
                 Filter: The Filter instance itself (for method chaining).
             """
             self.field = field
-            full_map = self.field.get_map()[:, :, np.newaxis]
-
-            render_height = renderer.height()
-            render_width = renderer.width()
-
-            # Fast path: If the map is already perfectly sized, use it instantly
-            if full_map.shape[0] == render_height and full_map.shape[1] == render_width:
-                self._map = full_map
-                return self
-
-            # Otherwise, force it to renderer dimensions to prevent broadcasting crashes
-            target_map = np.zeros((render_height, render_width, 1), dtype=np.float32)
-
-            orig_height, orig_width = full_map.shape[:2]
-
-            start_y = max((render_height - orig_height) // 2, 0)
-            start_x = max((render_width - orig_width) // 2, 0)
-
-            copy_h = min(render_height, orig_height)
-            copy_w = min(render_width, orig_width)
-
-            src_start_y = max((orig_height - render_height) // 2, 0)
-            src_start_x = max((orig_width - render_width) // 2, 0)
-
-            # BRIDGE: Safely extract to CPU if it's on the GPU
-            full_map_cpu = full_map.get() if hasattr(full_map, 'get') else full_map
-
-            target_map[start_y:start_y+copy_h, start_x:start_x+copy_w] = full_map_cpu[src_start_y:src_start_y+copy_h, src_start_x:src_start_x+copy_w]
-
-            # Push back to active hardware
-            self._map = np.asarray(target_map)
-
+            self._map = None
             return self
 
-        def _apply(self, pixels: np.ndarray) -> None:
-            """Apply the filter to a set of pixels.
+        def _resolved_map(self, pixels: np.ndarray) -> np.ndarray:
+            """Rasterize the field to match the given pixels, as an (H, W, 1) map."""
+            height = int(pixels.shape[0])
+            width = int(pixels.shape[1])
+            m = self.field.get_map(height, width)
+            if hasattr(m, 'ndim') and m.ndim == 2:
+                m = m[:, :, np.newaxis]
+            return m
 
-            Parameters:
-                pixels (np.ndarray): The pixel data to process.
+        def _mask_for(self, pixels: np.ndarray) -> np.ndarray:
+            """Return a mask guaranteed to match ``pixels`` (resolving it if needed)."""
+            m = self._map
+            if (m is None
+                    or m.shape[0] != pixels.shape[0]
+                    or m.shape[1] != pixels.shape[1]):
+                m = self._resolved_map(pixels)
+            return m
 
-            Note:
-                This method is currently a placeholder and must be implemented.
+        def apply_to(self, pixels: np.ndarray) -> np.ndarray:
+            """Resolve the mask at the pixel resolution, then apply the filter.
+
+            This is the entry point used by ``Frame.apply_filter``. It sets
+            ``self._map`` (an (H, W, 1) float mask in [0, 1]) so that even custom
+            ``apply`` implementations that reference ``self._map`` directly work
+            without worrying about resolution.
             """
+            self._map = self._resolved_map(pixels)
+            return self.apply(pixels)
+
+        def apply(self, pixels: np.ndarray) -> np.ndarray:
+            """Apply the filter to a set of pixels (overridden by subclasses)."""
+            return pixels
+
+        def _apply(self, pixels: np.ndarray) -> None:
+            """Deprecated placeholder kept for backwards compatibility."""
             pass
 
     class Solid_Color(Filter):
@@ -2981,15 +3322,12 @@ if len(_paths) != 0:
 
         def apply(self, pixels: np.ndarray) -> np.ndarray:
             """Apply the solid color filter to pixel data using the field mask."""
+            m = self._mask_for(pixels)
 
             # Explicitly convert the Python list to an array so CuPy can process it
             color_array = np.array([self.__b, self.__g, self.__r])
 
-            pixels = np.clip(
-                (pixels * (1 - self._map) + color_array * self._map),
-                0, 255
-            )
-            return pixels
+            return np.clip(pixels * (1 - m) + color_array * m, 0, 255)
 
     class Invert(Filter):
         """A filter that inverts the colors of a Field-based mask."""
@@ -3014,11 +3352,13 @@ if len(_paths) != 0:
             Returns:
                 np.ndarray: The color-inverted and blended pixel data, clipped to the valid range [0, 255].
             """
+            m = self._mask_for(pixels)
+
             # Invert the pixels
             inverted_pixels = 255 - pixels
 
             # Blend based on the map values
-            filtered_pixels = (1 - self._map) * pixels + self._map * inverted_pixels
+            filtered_pixels = (1 - m) * pixels + m * inverted_pixels
 
             return np.clip(filtered_pixels, 0, 255)
 
@@ -3053,6 +3393,8 @@ if len(_paths) != 0:
             Returns:
                 np.ndarray: The image with the frame applied at the specified position, blended with the field map.
             """
+            m = self._mask_for(pixels)
+
             frame_pixels = self.frame.get_pixels()
             frame_h, frame_w = frame_pixels.shape[:2]
             pixels_h, pixels_w = pixels.shape[:2]
@@ -3091,7 +3433,7 @@ if len(_paths) != 0:
             new_frame[y_start:y_end, x_start:x_end] = frame_pixels[frame_y_start:frame_y_end, frame_x_start:frame_x_end]
 
             # Blend with the field map
-            return np.clip(self._map * new_frame + (1 - self._map) * pixels, 0, 255)
+            return np.clip(m * new_frame + (1 - m) * pixels, 0, 255)
 
         def set_position(self, x: int, y: int) -> 'Draw_Frame':
             """Updates the frame's position.
@@ -3133,7 +3475,6 @@ if len(_paths) != 0:
             """
             self.frame = Frame(cv2.flip(self.frame.get_pixels(), 0))
             return self
-
 
 
 class Blur(Filter):
@@ -3868,5 +4209,30 @@ class SideOffsetFilter(Filter):
 
         return np.clip(output, 0, 255).astype(np.uint8)
 
+def run(setup, render):
+    """Hand control to the engine for a 'standard' project.
+
+    A standard project is built from two functions instead of a frame loop:
+
+        def setup():
+            # Runs once. Re-runs only when you edit this function.
+            # Initialise variables / precompute expensive things here,
+            # and declare them `global` so render() can read them.
+            ...
+
+        def render(f):
+            # Renders ONE frame (index f), independently of every other
+            # frame. Return a Frame (or raw HxWx3 uint8 pixels).
+            return ...
+
+        run(setup, render)   # <- hand control to the engine
+
+    The engine keeps your namespace alive between edits, so editing only
+    render() will NOT re-run setup() (your precomputed state is preserved).
+    While playing, the engine renders whatever frame matches the current
+    audio timestamp and skips frames it can't produce in time, so the
+    effective frame rate adapts to how expensive render() is.
+    """
+    renderer._run_standard(setup, render)
 
 

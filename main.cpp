@@ -70,6 +70,15 @@ QByteArray workerOutBuffer;
 std::function<void(bool)> workerOnFinished;
 FrameBufferReader* g_frameBuffer = nullptr;       // shared-memory frame buffer reader (frame-buffer mode)
 TabsWidget* g_mediaHeader = nullptr;              // for updating the preview tab's "[updating]" indicator
+PythonCodeEditor* g_codeEditor = nullptr;         // main user-script editor, for red error underlines
+QMap<int, LineError> g_errMap;                    // 1-based line -> error span+message (editor underlines)
+// Whether the current dispatch's errors (tracebacks + worker exit/respawn lines)
+// should be echoed to the output log. true for explicit Run/Export renders; false
+// for interactive auto-previews so realtime edits don't clog the log. Set once at
+// dispatch start (NOT touched by the kill/finished handlers, so leftover stderr
+// after an intentional kill is gated by the killed dispatch's value). Defaults
+// true so genuine pre-first-dispatch/startup errors are still visible.
+bool g_showErrorsForThisDispatch = true;
 
 // Updates the title label below the media tabs to show "[updating]" while a preview
 // render is in flight, but only when the user is actually viewing the preview tab.
@@ -86,12 +95,36 @@ static void updatePreviewTabLabel(bool updating) {
         g_mediaHeader->setLabelText(base);
     }
 }
+
+// Editor error underlines (which line, which column span, and the message shown on
+// hover) come from the worker's <<<NEO_ERR line startCol endCol message>>> stdout
+// sentinels, parsed in the readyReadStandardOutput handler into g_errMap. The worker
+// derives precise positions directly from Python (SyntaxError.offset for compile
+// errors; PEP 657 co_positions() for runtime errors) rather than us scraping the
+// rendered traceback, so the squiggle covers exactly the offending part of the line.
+
 bool isPreviewRender = false;            // current render is an auto-preview (suppress output, write preview.mp4)
 bool previewInFlight = false;            // an auto-preview is currently being rendered by the worker
 bool previewPending = false;             // user typed during a preview render → re-render after current finishes
 bool runInFlight = false;                // worker is currently running a Run-button script (output should show)
 bool runQueued = false;                  // user clicked Run; will dispatch once any current preview finishes
 QTimer* previewDebounceTimer = nullptr;
+
+// --- 'standard' template (on-demand single-frame) playback state ---
+// A standard project (setup/render via run()) drives the viewport one frame at a
+// time: the controller asks for a frame, we send FRAME:<f> to the worker, it
+// renders + publishes slot 0 and prints <<<NEO_FRAME f gen>>> then <<<NEO_DONE>>>.
+bool frameDispatchInFlight = false;       // a FRAME: request is currently being rendered by the worker
+int  pendingFrameIndex = -1;              // newest frame the controller wants (-1 = none); coalesces requests
+int  lastDisplayedFrame = -1;             // last frame index published to the viewport (skip redundant re-renders)
+bool sawStandardReadyThisDispatch = false;// the in-flight LEN: dispatch registered a standard project (run())
+bool lastDispatchWasStandard = false;     // the most recently completed dispatch was a standard project
+// An edit to a live standard project failed (syntax/setup/runtime error), so the
+// worker produced no STANDARD_READY this dispatch. We keep the standard session
+// alive (last good frame + timeline preserved) but suspend on-demand frame
+// requests until a later edit renders cleanly again. Cleared on the next
+// STANDARD_READY, on a legacy transition (FRAMES_READY), or on worker restart.
+bool standardRenderBroken = false;
 static const char* WORKER_DONE_SENTINEL = "<<<NEO_DONE>>>";
 
 // Cross-platform interrupt: ask the Python worker to abort the current render with
@@ -115,7 +148,7 @@ static void sendInterruptToWorker(qint64 pid) {
 }
 
 static const char* WORKER_SCRIPT = R"PYTHON(
-import sys, importlib, os, signal
+import sys, importlib, os, signal, traceback, linecache, itertools
 # On Windows, CTRL+BREAK's default handler terminates the process. Convert it to
 # KeyboardInterrupt so the worker can abort the current render and continue serving.
 if hasattr(signal, 'SIGBREAK'):
@@ -125,10 +158,101 @@ if hasattr(signal, 'SIGBREAK'):
         pass
 END = "<<<NEO_DONE>>>"
 last_mtime = None
+# Persistent namespace for 'standard' projects (setup/render via run()). While a
+# standard project is active we reuse this namespace across dispatches so that
+# editing only render() does NOT wipe the globals setup() precomputed.
+std_ns = None
+std_active = False
+
+# User code is compiled/executed under this synthetic filename so traceback line
+# numbers match the editor's gutter (line 1 == the first line the user wrote).
+USER_FILENAME = "<your script>"
+
+def _neo_b2c(s, off):
+    # co_positions() column offsets are UTF-8 BYTE offsets; convert to a character
+    # index so they line up with the editor's character columns (this matches how
+    # CPython itself places traceback carets). ASCII lines are unaffected.
+    try:
+        return len(s.encode('utf-8')[:off].decode('utf-8', 'replace'))
+    except Exception:
+        return off
+
+def _neo_emit_err(exc):
+    # Tell the host exactly where an error is, one machine-readable line per user
+    # location:  <<<NEO_ERR <1-based line> <startCol> <endCol> <message>>>>
+    # Columns are 0-based character offsets into the full source line; -1 means
+    # "unknown" (the host then underlines the whole line). Positions come straight
+    # from Python — SyntaxError.offset for compile errors, PEP 657 co_positions()
+    # for runtime errors — so the editor underlines exactly the offending span.
+    # Never raises: error reporting must not break the worker's serve loop.
+    try:
+        try:
+            summary = traceback.format_exception_only(type(exc), exc)[-1].strip()
+        except Exception:
+            summary = str(exc)
+        summary = summary.replace("\r", " ").replace("\n", " ")
+
+        if isinstance(exc, SyntaxError) and exc.lineno:
+            sc = (exc.offset - 1) if (exc.offset and exc.offset > 0) else -1
+            eo = getattr(exc, 'end_offset', None)
+            el = getattr(exc, 'end_lineno', exc.lineno)
+            ec = (eo - 1) if (eo and eo > 0) else -1
+            if el != exc.lineno:    # span crosses lines: mark from the start col only
+                ec = -1
+            if ec <= sc:
+                ec = -1
+            print(f"<<<NEO_ERR {exc.lineno} {sc} {ec} {summary}>>>", flush=True)
+            return
+
+        tb = exc.__traceback__
+        while tb is not None:
+            code = tb.tb_frame.f_code
+            if code.co_filename == USER_FILENAME:
+                ln = tb.tb_lineno
+                sc = ec = -1
+                try:
+                    psl, pel, psc, pec = next(
+                        itertools.islice(code.co_positions(), tb.tb_lasti // 2, None))
+                    if psl == pel == ln and psc is not None and pec is not None and pec > psc:
+                        lt = linecache.getline(USER_FILENAME, ln)
+                        sc = _neo_b2c(lt, psc)
+                        ec = _neo_b2c(lt, pec)
+                        if ec <= sc:
+                            sc = ec = -1
+                except Exception:
+                    sc = ec = -1
+                print(f"<<<NEO_ERR {ln} {sc} {ec} {summary}>>>", flush=True)
+            tb = tb.tb_next
+    except Exception:
+        pass
+
 while True:
     header = sys.stdin.readline()
     if not header:
         break
+
+    # On-demand single-frame request for a live standard project. No body follows
+    # the header; we just render that one frame and publish it to the buffer.
+    if header.startswith("FRAME:"):
+        try:
+            f = int(header[6:].strip())
+        except ValueError:
+            print(END, flush=True)
+            continue
+        if std_active and 'neovere' in sys.modules:
+            try:
+                sys.modules['neovere'].renderer._render_one(f)
+            except KeyboardInterrupt:
+                pass
+            except Exception as exc:
+                _neo_emit_err(exc)
+                tb = exc.__traceback__.tb_next if exc.__traceback__ is not None else None
+                traceback.print_exception(type(exc), exc, tb)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        print(END, flush=True)
+        continue
+
     if not header.startswith("LEN:"):
         continue
     try:
@@ -144,6 +268,11 @@ while True:
             current_mtime = os.path.getmtime('neovere.py')
             if current_mtime > last_mtime:
                 importlib.reload(sys.modules['neovere'])
+                # The module (and its renderer/media) was replaced, so any live
+                # standard session is stale — start fresh so setup() re-runs
+                # against the new module state.
+                std_active = False
+                std_ns = None
         except Exception as e:
             print(f"[worker] reload check failed: {e}")
 
@@ -156,14 +285,82 @@ while True:
         except Exception:
             pass
 
+    # Reuse the standard project's namespace only when the PREVIOUS dispatch was a
+    # live standard project, so a render-only edit keeps setup()'s precomputed
+    # globals. A fresh namespace forces setup() to run again (repopulating them).
+    fresh_namespace = not (std_active and std_ns is not None)
+    if 'neovere' in sys.modules:
+        try:
+            sys.modules['neovere'].renderer._begin_dispatch(fresh_namespace)
+        except Exception:
+            pass
+
+    # Split the payload into the engine prologue (internal setup we prepend) and
+    # the user's editor script. They are compiled SEPARATELY so the user's code
+    # keeps its own filename and line numbers (line 1 == the first line they
+    # wrote) instead of being shifted by the prologue and labelled "<string>".
+    # MARKER must stay in sync with USER_CODE_MARKER on the C++ side.
+    MARKER = "#<<<NEO_USER_CODE>>>\n"
+    USER_FILENAME = "<your script>"
+    _i = script.find(MARKER)
+    if _i == -1:
+        prologue, user_src = script, None        # legacy/raw payload: run as-is
+    else:
+        prologue, user_src = script[:_i], script[_i + len(MARKER):]
+
+    ns = ({'__name__': '__main__'} if fresh_namespace else std_ns)
+    ok = True
     try:
-        exec(script, {'__name__': '__main__'})
+        exec(compile(prologue, "<neovere-prelude>", "exec"), ns)
     except KeyboardInterrupt:
         # Aborted by SIGINT (e.g. Run button interrupting an auto-preview). Just continue.
-        pass
+        ok = False
     except Exception:
-        import traceback
+        # Failure in internal setup (e.g. neovere.py import). Show it in full.
         traceback.print_exc()
+        ok = False
+
+    if ok and user_src is not None:
+        # Register the source so the traceback can quote the offending line, even
+        # though the filename is synthetic (not a real file on disk).
+        linecache.cache[USER_FILENAME] = (
+            len(user_src), None, user_src.splitlines(keepends=True), USER_FILENAME)
+        try:
+            user_code = compile(user_src, USER_FILENAME, "exec")
+        except SyntaxError as exc:
+            # Compile-time error: print only the error itself. It already carries the
+            # correct file, line and caret, and there are no user frames to show.
+            _neo_emit_err(exc)
+            sys.stderr.write("".join(traceback.format_exception_only(type(exc), exc)))
+            sys.stderr.flush()
+        else:
+            try:
+                exec(user_code, ns)
+            except KeyboardInterrupt:
+                pass
+            except Exception as exc:
+                # Drop this runner's own exec(...) frame so the traceback starts at
+                # the user's script rather than the worker internals.
+                _neo_emit_err(exc)
+                tb = exc.__traceback__.tb_next if exc.__traceback__ is not None else None
+                traceback.print_exception(type(exc), exc, tb)
+
+    # Did THIS script register a standard render via run()? If so, keep its
+    # namespace alive for subsequent FRAME: requests and render-only edits;
+    # otherwise fall back to legacy (a fresh namespace next dispatch).
+    now_standard = False
+    if ok and 'neovere' in sys.modules:
+        try:
+            now_standard = bool(sys.modules['neovere'].renderer.is_standard())
+        except Exception:
+            now_standard = False
+    if now_standard:
+        std_active = True
+        std_ns = ns
+    else:
+        std_active = False
+        std_ns = None
+
     try:
         last_mtime = os.path.getmtime('neovere.py')
     except Exception:
@@ -507,6 +704,27 @@ QString resolvePythonExecutable() {
 #endif
 }
 
+// Send the newest pending on-demand frame request to the worker, if one is queued
+// and the worker is free. Coalesces: while a FRAME: is in flight, or a preview/run
+// LEN: dispatch owns the worker, requests just update pendingFrameIndex; this drains
+// the latest one when the worker frees up. Skips re-rendering the frame already shown.
+void pumpFrameQueue() {
+    if (frameDispatchInFlight) return;                 // worker busy with a frame
+    if (previewInFlight || runInFlight) return;        // a LEN: dispatch owns the worker
+    if (standardRenderBroken) {                        // current render errors; don't spam the worker
+        pendingFrameIndex = -1;
+        return;
+    }
+    if (pendingFrameIndex < 0) return;                 // nothing queued
+    if (!pythonWorker || pythonWorker->state() != QProcess::Running) return;
+    int f = pendingFrameIndex;
+    pendingFrameIndex = -1;
+    if (f == lastDisplayedFrame) return;               // already showing this frame
+    frameDispatchInFlight = true;
+    QByteArray header = QString("FRAME:%1\n").arg(f).toUtf8();
+    pythonWorker->write(header);
+}
+
 void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, MediaFrame* mediaPanel) {
     if (pythonWorker) {
         if (pythonWorker->state() == QProcess::Running) return;
@@ -537,9 +755,18 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
 
             if (line == "<<<NEO_BEGIN_PREVIEW>>>") {
                 isPreviewRender = true;
+                sawStandardReadyThisDispatch = false;
             } else if (line == "<<<NEO_BEGIN_RUN>>>") {
                 isPreviewRender = false;
+                sawStandardReadyThisDispatch = false;
             } else if (line == "<<<NEO_FRAMES_READY>>>") {
+                // A legacy multi-frame preview filled the buffer. If we were in
+                // on-demand standard mode, leave it — this is the buffer-driven path.
+                if (mediaPanel->fbController() && mediaPanel->fbController()->isStandardMode()) {
+                    mediaPanel->endStandardMode();
+                }
+                lastDispatchWasStandard = false;
+                standardRenderBroken = false;   // genuine switch to a legacy project
                 // Auto-preview wrote frames into shared memory. Switch the preview tab
                 // to FrameBuffer mode and refresh.
                 if (!g_frameBuffer) {
@@ -599,7 +826,139 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                         mediaPanel->reloadVideo(savedPos, wasPlaying);
                     }
                 }
+            } else if (line.startsWith("<<<NEO_STANDARD_READY ")) {
+                // A standard project (setup/render via run()) published its initial
+                // frame into slot 0 and reported the timeline (w h fps duration gen).
+                // Bind the buffer, enter on-demand standard playback, and paint it.
+                QString payload = QString::fromUtf8(line);
+                payload.remove(0, QString("<<<NEO_STANDARD_READY ").size());
+                if (payload.endsWith(">>>")) payload.chop(3);
+                QStringList parts = payload.split(' ', Qt::SkipEmptyParts);
+                if (parts.size() >= 4) {
+                    float stdFpsVal = parts[2].toFloat();
+                    int   stdDurVal = parts[3].toInt();
+                    if (!g_frameBuffer) {
+                        g_frameBuffer = new FrameBufferReader(QDir::tempPath() + "/neovere_frames.bin");
+                    }
+                    if (!g_frameBuffer->isOpen()) {
+                        g_frameBuffer->open();
+                    }
+                    if (g_frameBuffer->isOpen()) {
+                        g_frameBuffer->refreshHeader();
+                        mediaPanel->setFrameBuffer(g_frameBuffer);
+                    }
+                    bool freshEntry = !lastDispatchWasStandard;
+                    mediaPanel->beginStandardMode(stdDurVal, stdFpsVal, freshEntry);
+                    sawStandardReadyThisDispatch = true;
+                    lastDispatchWasStandard = true;
+                    standardRenderBroken = false;   // a clean render recovered the session
+                    // The initial frame is now showing; sync bookkeeping so play()
+                    // doesn't immediately re-request the identical frame.
+                    lastDisplayedFrame = mediaPanel->fbController()
+                        ? mediaPanel->fbController()->currentFrame() : 0;
+                    pendingFrameIndex = -1;
+                }
+            } else if (line.startsWith("<<<NEO_STANDARD_AUDIO ")) {
+                // A standard project reported its preview audio (emitted right after
+                // STANDARD_READY, only on dispatches where setup() ran):
+                //   "ready" -> cached_preview_audio.aac holds this project's audio.
+                //   "none"  -> this project attached no audio; drop any stale track.
+                // Render-only edits emit nothing here, so the currently-loaded audio
+                // keeps playing seamlessly across them.
+                QString payload = QString::fromUtf8(line);
+                payload.remove(0, QString("<<<NEO_STANDARD_AUDIO ").size());
+                if (payload.endsWith(">>>")) payload.chop(3);
+                const QString state = payload.trimmed();
+                if (mediaPanel->currentMode() == MediaFrame::Mode::FrameBuffer) {
+                    if (state == "ready" && QFile::exists("cached_preview_audio.aac")) {
+                        mediaPanel->setFrameBufferAudio(
+                            QFileInfo("cached_preview_audio.aac").absoluteFilePath());
+                        // Force a fresh read: the content changed even though the path
+                        // (and thus the QMediaPlayer source URL) is identical.
+                        mediaPanel->reloadFrameBufferAudio();
+                    } else {
+                        // No audio for this project — clear the source so nothing stale
+                        // plays as a bogus master clock.
+                        mediaPanel->setFrameBufferAudio(QString());
+                    }
+                }
+            } else if (line.startsWith("<<<NEO_FRAME ")) {
+                // An on-demand frame landed in slot 0. Paint it (standard mode only;
+                // the initial NEO_FRAME arrives just before STANDARD_READY, before we
+                // are in standard mode — that one is painted by STANDARD_READY).
+                QString payload = QString::fromUtf8(line);
+                payload.remove(0, QString("<<<NEO_FRAME ").size());
+                if (payload.endsWith(">>>")) payload.chop(3);
+                QStringList parts = payload.split(' ', Qt::SkipEmptyParts);
+                if (!parts.isEmpty()) {
+                    int f = parts[0].toInt();
+                    lastDisplayedFrame = f;
+                    if (mediaPanel->fbController() && mediaPanel->fbController()->isStandardMode()) {
+                        mediaPanel->fbController()->onFrameRendered(f);
+                    }
+                }
             } else if (line == WORKER_DONE_SENTINEL) {
+                // (1) On-demand FRAME: request finished — unblock and pump the next.
+                if (frameDispatchInFlight) {
+                    frameDispatchInFlight = false;
+                    pumpFrameQueue();
+                    continue;
+                }
+                // (2) Standard project dispatch finished — STANDARD_READY already put
+                // the panel in on-demand mode; there is no preview.mp4 to reload.
+                if (sawStandardReadyThisDispatch) {
+                    previewInFlight = false;
+                    if (!previewPending) {
+                        updatePreviewTabLabel(false);
+                    }
+                    if (previewPending) {
+                        previewPending = false;
+                        if (previewDebounceTimer) previewDebounceTimer->start(0);
+                    }
+                    isPreviewRender = false;
+                    pumpFrameQueue();  // resume any frame request blocked during the dispatch
+                    if (workerOnFinished) {
+                        auto cb = workerOnFinished;
+                        workerOnFinished = nullptr;
+                        cb(true);
+                    }
+                    continue;
+                }
+                // (3) Legacy finalization. We were in standard mode but this dispatch
+                // produced no STANDARD_READY (and no FRAMES_READY, which is handled
+                // above). Two very different causes:
+                //   - An explicit Run (runInFlight) of a now-legacy script: a genuine
+                //     switch to file-based output, so leave standard mode.
+                //   - An auto-preview (edit-triggered) that FAILED to register as a
+                //     standard project: i.e. the edit has a syntax/setup/runtime error
+                //     (run() either never executed or threw before STANDARD_READY).
+                //     A transient edit error must NOT tear down the live session — keep
+                //     the last good frame + timeline, suspend on-demand frame requests
+                //     so we stop hammering the worker with frames that would just
+                //     re-error, and preserve lastDispatchWasStandard so the corrected
+                //     edit resumes in place (not a freshEntry rewind to 0).
+                if (lastDispatchWasStandard) {
+                    if (runInFlight) {
+                        if (mediaPanel->fbController() && mediaPanel->fbController()->isStandardMode()) {
+                            mediaPanel->endStandardMode();
+                        }
+                        lastDispatchWasStandard = false;
+                        standardRenderBroken = false;
+                    } else {
+                        // Edit error in a live standard project: keep the session, the
+                        // last good frame, and the timeline. Suspend on-demand frame
+                        // requests (pumpFrameQueue honors standardRenderBroken) so we
+                        // don't hammer the worker with frames that would just re-error.
+                        // We deliberately do NOT change the play state: the play/pause
+                        // button tracks its own state and does not observe the
+                        // controller, so toggling here would desync the button. While
+                        // paused the playhead simply holds on the last good frame; while
+                        // playing it advances over that frozen frame. The next clean
+                        // edit clears the flag and resumes rendering in place.
+                        standardRenderBroken = true;
+                        pendingFrameIndex = -1;
+                    }
+                }
                 // Use previewInFlight (set at dispatch time) as the source of truth.
                 // isPreviewRender depends on the BEGIN marker, which doesn't print when the
                 // user's script fails with a SyntaxError (compile-time error).
@@ -643,6 +1002,33 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                     workerOnFinished = nullptr;
                     cb(true);
                 }
+            } else if (line.startsWith("<<<NEO_ERR ")) {
+                // Precise per-line error location from the worker:
+                //   <<<NEO_ERR <1-based line> <startCol> <endCol> <message...>>>>
+                // Columns are 0-based char offsets; -1 means "unknown" (the editor
+                // then underlines the whole line). Drives the red squiggle span, the
+                // hover message, and the red gutter number. Consumed here so it never
+                // reaches the output log, regardless of run/preview gating.
+                QString payload = QString::fromUtf8(line);
+                payload.remove(0, QString("<<<NEO_ERR ").size());
+                if (payload.endsWith(">>>")) payload.chop(3);
+                const QStringList parts = payload.split(' ');
+                if (parts.size() >= 3 && g_codeEditor) {
+                    bool okL = false, okS = false, okE = false;
+                    const int ln = parts[0].toInt(&okL);
+                    const int sc = parts[1].toInt(&okS);
+                    const int ec = parts[2].toInt(&okE);
+                    if (okL && okS && okE && ln > 0) {
+                        // Everything after the first three tokens is the message.
+                        const int cut = parts[0].size() + 1 + parts[1].size() + 1 + parts[2].size();
+                        LineError le;
+                        le.message = (cut < payload.size()) ? payload.mid(cut + 1) : QString();
+                        le.startCol = sc;
+                        le.endCol = ec;
+                        g_errMap.insert(ln, le);
+                        g_codeEditor->setErrors(g_errMap);
+                    }
+                }
             } else if (runInFlight || (!isPreviewRender && !previewInFlight)) {
                 outputDisplay->appendPlainText(QString::fromUtf8(line));
             }
@@ -651,21 +1037,43 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
 
     QObject::connect(pythonWorker, &QProcess::readyReadStandardError, [outputDisplay]() {
         QString err = QString::fromUtf8(pythonWorker->readAllStandardError());
-        if (!err.isEmpty() && (runInFlight || !previewInFlight)) outputDisplay->appendPlainText(err.trimmed());
+        if (err.isEmpty()) return;
+        // Editor underlines now come from the worker's <<<NEO_ERR ...>>> stdout
+        // sentinels (precise line + column), parsed in the stdout handler. Here we
+        // only decide whether to echo the human-readable traceback to the output log:
+        // only for explicit Run/Export renders. During realtime edits (auto-preview)
+        // the red underline is the feedback; keep the log clean. The flag persists
+        // across the kill that ends a dispatch, so a half-flushed traceback from a
+        // killed auto-preview stays suppressed too.
+        if (g_showErrorsForThisDispatch) outputDisplay->appendPlainText(err.trimmed());
     });
 
     QObject::connect(pythonWorker, &QProcess::errorOccurred, [outputDisplay](QProcess::ProcessError error) {
-        outputDisplay->appendPlainText(QString("Worker process error: %1").arg(error));
+        // We intentionally kill+respawn the worker on every edit during realtime
+        // editing, which fires this with Crashed. Only surface it for an explicit
+        // Run/Export render that genuinely failed — otherwise it just clogs the log.
+        if (g_showErrorsForThisDispatch)
+            outputDisplay->appendPlainText(QString("Worker process error: %1").arg(error));
     });
 
     QObject::connect(pythonWorker, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
         [outputDisplay, mediaHeader, mediaPanel](int exitCode, QProcess::ExitStatus) {
-            outputDisplay->appendPlainText(QString("Worker exited (code %1). Respawning...").arg(exitCode));
+            // Same as above: suppress the respawn chatter during realtime edits.
+            if (g_showErrorsForThisDispatch)
+                outputDisplay->appendPlainText(QString("Worker exited (code %1). Respawning...").arg(exitCode));
 
             // Clear flags
             previewInFlight = false;
             isPreviewRender = false;
             updatePreviewTabLabel(false);
+            // The worker died (possibly mid-FRAME). Reset on-demand dispatch state so
+            // the frame queue isn't stuck "in flight" forever. The standard session
+            // is also gone (the new worker has no namespace), so force a fresh entry.
+            frameDispatchInFlight = false;
+            sawStandardReadyThisDispatch = false;
+            lastDispatchWasStandard = false;
+            standardRenderBroken = false;
+            pendingFrameIndex = -1;
 
             // 1. Respawn FIRST so the worker is running for any subsequent callbacks
             startPythonWorker(outputDisplay, mediaHeader, mediaPanel);
@@ -706,6 +1114,15 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
 
     outputDisplay->appendPlainText("Compiling video ...");
 
+    // New dispatch: drop any error underlines + stale stderr from the previous run.
+    // If this run fails, the stderr handler re-populates underlines from the fresh
+    // traceback; if it succeeds, the editor stays clean.
+    g_errMap.clear();
+    if (g_codeEditor) g_codeEditor->clearErrors();
+    // compileCode is only reached by an explicit Export re-render — always log its
+    // errors so a failed export is visible.
+    g_showErrorsForThisDispatch = true;
+
     // Use .format() to avoid illegal backslash escapes inside f-strings
     QString wrapped =
         "print('<<<NEO_BEGIN_RUN>>>', flush=True)\n"
@@ -713,6 +1130,10 @@ void compileCode(QString code, QPlainTextEdit* outputDisplay, TabsWidget * media
         "print('[info] Engine Compute: {}'.format('GPU Accelerated (CuPy)' if _neovere_mod.np.__name__ == 'cupy' else 'CPU Default (NumPy)'), flush=True)\n"
         "_neovere_mod.renderer.set_preview_mode(False)\n"
         "_neovere_mod.renderer.set_show_previews(True)\n"
+        // Marker: everything below is the user's editor script. The worker compiles
+        // it as its own unit so tracebacks use the user's line numbers, not ours.
+        // Must stay in sync with WORKER_SCRIPT's MARKER constant.
+        "#<<<NEO_USER_CODE>>>\n"
         + code;
 
     QByteArray scriptBytes = wrapped.toUtf8();
@@ -735,7 +1156,22 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
     previewInFlight = true;
     updatePreviewTabLabel(true);
 
+    // New dispatch: drop error underlines + stale stderr. Auto-preview tracebacks
+    // are hidden from the output display, but underlines are still applied (the
+    // stderr handler parses them unconditionally) so typos surface live as you type.
+    g_errMap.clear();
+    if (g_codeEditor) g_codeEditor->clearErrors();
+    // dispatchPreview serves both the Run button (runInFlight) and the debounced
+    // auto-preview. Log errors only for the explicit Run; keep auto-previews quiet.
+    g_showErrorsForThisDispatch = runInFlight;
+
     QString useFrameBuffer = runInFlight ? "False" : "True";
+
+    // For 'standard' projects, render the frame the user is currently viewing (not
+    // always frame 0) so render-only edits update in place. Harmless for legacy
+    // projects (just sets a field they never read). 0 before any standard session.
+    int curFrame = (mediaPanel && mediaPanel->fbController())
+        ? mediaPanel->fbController()->currentFrame() : 0;
 
     // Use .format() to avoid illegal backslash escapes inside f-strings
     QString computeLog = runInFlight ? "print('[info] Engine Compute: {}'.format('GPU Accelerated (CuPy)' if _neovere_mod.np.__name__ == 'cupy' else 'CPU Default (NumPy)'), flush=True)\n" : "";
@@ -747,6 +1183,9 @@ void dispatchPreview(QString code, QPlainTextEdit* outputDisplay, TabsWidget* me
         "_neovere_mod.renderer.set_preview_mode(True)\n"
         "_neovere_mod.renderer.set_show_previews(" + QString(runInFlight ? "True" : "False") + ")\n"
         "_neovere_mod.renderer.set_use_frame_buffer(" + useFrameBuffer + ")\n"
+        "_neovere_mod.renderer._set_request_frame(" + QString::number(curFrame) + ")\n"
+        // Marker: everything below is the user's editor script (see WORKER_SCRIPT).
+        "#<<<NEO_USER_CODE>>>\n"
         + code;
 
 #ifdef Q_OS_WIN
@@ -801,8 +1240,9 @@ void removeImportedTabs(TabsWidget *mediaHeader) {
     }
 }
 
-void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText, TabsWidget * mediaHeader) {
-    codePanel->setPlainText(readFromFile(":/resources/code/default_project.py"));
+void createNewFile(QPlainTextEdit* codePanel, QPlainTextEdit *outputText, TabsWidget * mediaHeader,
+                   const QString& templatePath = ":/resources/code/default_project.py") {
+    codePanel->setPlainText(readFromFile(templatePath));
     removeImportedTabs(mediaHeader);
     outputText->appendPlainText("New file created");
 }
@@ -1062,6 +1502,10 @@ bool saveClass(const QString &category, const QString &content, QWidget *parent 
     out << content;
     file.close();
 
+    // A custom field/filter/class just changed on disk, so the shared member
+    // autocomplete table is now stale; force a rebuild on the next dot.
+    PythonCodeEditor::invalidateApiTable();
+
     QMessageBox::information(parent,
                            "Save Successful",
                            QString("Successfully saved class %1 to:\n%2")
@@ -1127,6 +1571,8 @@ void updateDocumentationTextBox(const QString &classCatagory,
                                 updateDocumentationTextBox(classCatagory, docsTextBoxes,
                                     docSources, rightStack, editClassLine, editClassEditor, mediaPath);
                                 remakeNeoverePy(mediaPath);
+                                // The deleted class must drop out of the autocomplete table too.
+                                PythonCodeEditor::invalidateApiTable();
                             }
                         } else {
                             QMessageBox::warning(nullptr, "File Not Found", "The class file does not exist.");
@@ -1269,6 +1715,7 @@ int main(int argc, char *argv[]) {
     codePanel->setPlaceholderText("INPUT"); // Set placeholder text
     codePanel->setLineWrapMode(QPlainTextEdit::NoWrap);
     codePanel->setFrameStyle(QFrame::Box | QFrame::Sunken);
+    g_codeEditor = codePanel;   // dispatch/stderr handlers underline error lines here
 
     new PythonHighlighter(codePanel->document());
 
@@ -1318,6 +1765,15 @@ int main(int argc, char *argv[]) {
     MediaFrame *mediaPanel = new MediaFrame;
     mediaPanel->setFrameStyle(QFrame::Box | QFrame::Raised);
     mediaPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding); // Expands width, fixed height
+
+    // Standard (on-demand) playback: when the controller wants a frame, queue it and
+    // pump it to the Python worker as a FRAME: request (coalesced; drops frames it
+    // can't keep up with). This is a no-op outside standard mode.
+    QObject::connect(mediaPanel->fbController(), &PlaybackController::frameNeeded,
+                     [](int frameIndex) {
+        pendingFrameIndex = frameIndex;
+        pumpFrameQueue();
+    });
 
     QMediaPlayer *player = mediaPanel->getPlayer();
 
@@ -1511,8 +1967,8 @@ int main(int argc, char *argv[]) {
     // generote neovere.py file
     remakeNeoverePy(mediaPath);
 
-    // open default file
-    createNewFile(codePanel, outputDisplay, mediaHeader);
+    // open default file (Standard template: setup() + render(f) on-demand)
+    createNewFile(codePanel, outputDisplay, mediaHeader, ":/resources/code/default_project_standard.py");
 
     // create shortcut for saving0
     QShortcut *saveShortcut = new QShortcut(QKeySequence::Save, &window);
@@ -1641,9 +2097,21 @@ int main(int argc, char *argv[]) {
 
     QObject::connect(mediaHeader, &TabsWidget::tabSelected, [mediaHeader, &currentVideo, mediaPanel, videoSlider, pauseButton](int index) {
         currentVideo = mediaHeader->getTab(index)->getData();
+        // In a live standard project the "preview" tab is backed by the on-demand frame
+        // buffer (slot 0 holds the last rendered frame), not preview.mp4 — and a new frame
+        // is only produced when the code is edited. Re-show that buffer instead of loading
+        // the stale preview.mp4, which would otherwise appear until the next edit re-rendered.
+        if (currentVideo == "preview.mp4" && mediaPanel->fbController()
+                && mediaPanel->fbController()->isStandardMode()) {
+            mediaPanel->switchToFrameBuffer();
+            mediaPanel->fbController()->refresh();   // re-read slot 0 + sync slider/duration
+            pauseButton->setState(true);
+            updatePreviewTabLabel(previewInFlight);
+            return;
+        }
         // Selecting any tab forces video-file mode so the user actually sees the chosen
-        // video. The preview tab will switch back to FrameBuffer mode automatically when
-        // the next auto-preview completes (FRAMES_READY marker).
+        // video. The (legacy) preview tab switches back to FrameBuffer mode automatically
+        // when the next auto-preview completes (FRAMES_READY marker).
         mediaPanel->switchToVideoFile();
         mediaPanel->setVideo(currentVideo);
         pauseButton->setState(true);
@@ -1654,17 +2122,27 @@ int main(int argc, char *argv[]) {
 
     // make the new button open a new default file
     QObject::connect(newButton, &QPushButton::clicked, [codePanel, outputDisplay, mediaHeader, &currentFile, &updateTitle]() {
-        QMessageBox confirmationDialog;
-        confirmationDialog.setWindowTitle("Confirm New Program");
-        confirmationDialog.setText("Are you sure you want to create a new program? Unsaved changes will be lost.");
-        confirmationDialog.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
-        confirmationDialog.setDefaultButton(QMessageBox::No);
+        QMessageBox dlg;
+        dlg.setWindowTitle("New Program");
+        dlg.setText("Choose a template for the new program.\nUnsaved changes will be lost.");
+        dlg.setInformativeText(
+            "Standard: setup() runs once; render(f) renders one frame on demand.\n"
+            "Legacy: a frame loop that builds the whole video each update.");
+        QPushButton* standardBtn = dlg.addButton("Standard", QMessageBox::AcceptRole);
+        QPushButton* legacyBtn   = dlg.addButton("Legacy",   QMessageBox::AcceptRole);
+        QPushButton* cancelBtn   = dlg.addButton(QMessageBox::Cancel);
+        dlg.setDefaultButton(standardBtn);
+        dlg.exec();
 
-        if (confirmationDialog.exec() == QMessageBox::Yes) {
-            createNewFile(codePanel, outputDisplay, mediaHeader);
-            currentFile = "";
-            updateTitle();
-        }
+        QAbstractButton* clicked = dlg.clickedButton();
+        if (clicked == cancelBtn || clicked == nullptr) return;
+
+        QString tmpl = (clicked == legacyBtn)
+            ? ":/resources/code/default_project.py"
+            : ":/resources/code/default_project_standard.py";
+        createNewFile(codePanel, outputDisplay, mediaHeader, tmpl);
+        currentFile = "";
+        updateTitle();
     });
 
 

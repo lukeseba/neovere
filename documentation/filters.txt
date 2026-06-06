@@ -1,5 +1,12 @@
 * class Filter:
-#    A filter that aligns a Field object with the current renderer dimensions.
+#    A filter that masks an effect through a vector-based Field.
+#
+#    Filters no longer pre-bake a fixed-resolution mask. Instead they hold a
+#    reference to a :class:`Field` and rasterize it on demand at the *exact*
+#    resolution of the pixels being processed (via ``apply_to``). This keeps
+#    the mask aligned with the frame no matter what ``dx`` / preview scaling
+#    the renderer is using, so the old broadcasting mismatches can't happen.
+#
 
     profiled_init(*args, **kw):
 
@@ -12,14 +19,29 @@
 #
 
     set_field(field: Field) -> 'Filter':
-#    Set a new Field and crop its map to match the renderer dimensions.
+#    Set the Field that masks this filter.
+#
+#    The field is stored by reference and is rasterized lazily, so no map
+#    is computed here. The last resolved mask is invalidated.
 #
 #    Parameters:
-#        field (Field): The Field object containing the source map.
+#        field (Field): The Field object providing the mask.
 #
 #    Returns:
 #        Filter: The Filter instance itself (for method chaining).
 #
+
+    apply_to(pixels: np.ndarray) -> np.ndarray:
+#    Resolve the mask at the pixel resolution, then apply the filter.
+#
+#    This is the entry point used by ``Frame.apply_filter``. It sets
+#    ``self._map`` (an (H, W, 1) float mask in [0, 1]) so that even custom
+#    ``apply`` implementations that reference ``self._map`` directly work
+#    without worrying about resolution.
+#
+
+    apply(pixels: np.ndarray) -> np.ndarray:
+#    Apply the filter to a set of pixels (overridden by subclasses).
 
 * class Solid_Color(Filter):
 #    A filter that overlays a solid color onto a Field-based mask.
@@ -125,7 +147,6 @@
 #    Returns:
 #        Draw_Frame: The current instance with the frame mirrored along the y-axis.
 #
-
 class Blur(Filter):
 #A filter that applies a blur effect to the image using the field mask.
 

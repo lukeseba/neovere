@@ -1,5 +1,8 @@
+#pragma once
+
 #include <QSyntaxHighlighter>
 #include <QTextCharFormat>
+#include <QColor>
 #include <QRegularExpression>
 #include <QPlainTextEdit>
 #include <QTextEdit>
@@ -9,12 +12,21 @@ class PythonHighlighter : public QSyntaxHighlighter {
     Q_OBJECT
 
 public:
+    // ---- Editor color scheme: single source of truth -----------------------
+    // The autocomplete popup (PythonCodeEditor) reuses these accessors so each
+    // category's colour is defined exactly once, here, and stays in sync between
+    // the syntax highlighting and the completion list. Change a colour here and it
+    // updates in both places.
+    static QColor variableColor() { return QColor(100, 90, 110); } // plain identifiers / variables
+    static QColor classColor()    { return QColor(Qt::red); }      // class names
+    static QColor callableColor() { return QColor(185, 80, 135); } // methods / function calls
+
     explicit PythonHighlighter(QTextDocument *parent = nullptr)
         : QSyntaxHighlighter(parent), inMultilineComment(false) {
         HighlightingRule rule;
 
         // Set default text color to dark grey
-        defaultTextFormat.setForeground(QColor(100, 90, 110)); // Dark grey color
+        defaultTextFormat.setForeground(variableColor()); // plain identifiers / variables
 
         // Keywords
         QTextCharFormat keywordFormat;
@@ -55,14 +67,14 @@ public:
 
         // Function calls
         QTextCharFormat functionCallFormat;
-        functionCallFormat.setForeground(QColor(185, 80, 135));
+        functionCallFormat.setForeground(callableColor());
         rule.pattern = QRegularExpression("\\b\\w+\\b(?=\\s*\\()");
         rule.format = functionCallFormat;
         highlightingRules.append(rule);
 
         // Class names
         QTextCharFormat classFormat;
-        classFormat.setForeground(Qt::red); // Highlight classes in red
+        classFormat.setForeground(classColor()); // Highlight classes in red
         rule.pattern = QRegularExpression("\\b[A-Z][a-zA-Z0-9_]*\\b(?=\\s*\\()");
         rule.format = classFormat;
         highlightingRules.append(rule);
