@@ -213,15 +213,15 @@ class Frame:
         else:
             cv2.waitKey(1)
 
-    def crop(self, x1: int, y1: int, x2: int, y2: int) -> None:
+    def crop(self, corner1: tuple, corner2: tuple) -> None:
         """Crop the frame to a rectangle defined by two corners.
 
         Parameters:
-            x1 (int): Left (starting) x-coordinate.
-            y1 (int): Top (starting) y-coordinate.
-            x2 (int): Right (ending) x-coordinate.
-            y2 (int): Bottom (ending) y-coordinate.
+            corner1 (tuple) @position: (x, y) pixels of the top-left corner.
+            corner2 (tuple) @position: (x, y) pixels of the bottom-right corner.
         """
+        x1, y1 = int(corner1[0]), int(corner1[1])
+        x2, y2 = int(corner2[0]), int(corner2[1])
         x1 = max(0, min(x1, self._width))
         y1 = max(0, min(y1, self._height))
         x2 = max(0, min(x2, self._width))
@@ -237,6 +237,13 @@ class Color_Frame(Frame):
     """A class to represent and manipulate a frame composed of a single RGB color"""
 
     def __init__(self, width: int, height: int, color: tuple = (0, 0, 0)):
+        """Create a frame filled with a single solid RGB color.
+
+        Parameters:
+            width (int): Frame width in pixels.
+            height (int): Frame height in pixels.
+            color (tuple) @color: The fill color as an (r, g, b) tuple, each 0–255.
+        """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
             raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
@@ -248,6 +255,11 @@ class Color_Frame(Frame):
         super().__init__(pixels)
 
     def change_color(self, color: tuple) -> None:
+        """Replace the frame's fill color.
+
+        Parameters:
+            color (tuple) @color: The new color as an (r, g, b) tuple, each 0–255.
+        """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
             raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")

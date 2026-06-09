@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QString>
 #include <QStringList>
+#include <QTextCursor>
 
 #include "SearchTextEdit.h"
 
@@ -15,6 +16,7 @@ class LineNumberArea;
 class QCompleter;
 class QStandardItemModel;
 class CompletionDocBox;   // signature + description popup, defined in the .cpp
+class ParamPanel;         // interactive parameter-input panel, defined in the .cpp
 class QTimer;
 
 // One reported Python error pinned to a 1-based source line. startCol/endCol are
@@ -38,6 +40,9 @@ struct MemberInfo {
     QString attrType;         // attribute: class from "self.x = ClassName(...)" if any
     QString params;           // method: cleaned parameter list (self/cls dropped) for the signature box
     QString doc;              // docstring body (dedented), shown in the documentation box
+    QString paramDoc;         // docstring to parse for per-parameter descriptions/tags. For a
+                              // class constructor this is __init__'s docstring (not the class
+                              // docstring, which is what doc holds); for a method it equals doc.
 };
 
 // Category of a completion entry, mirroring the syntax highlighter's colours so the
@@ -53,6 +58,20 @@ struct CompletionItem {
     bool takesArgs = false;   // callables only: leave the caret inside the "()"
 };
 
+// The call whose parentheses enclose the caret, located by findEnclosingCall().
+// valid is false when the caret isn't inside any call's "(...)". openPos is the
+// document position of the "(" itself; closePos is its matching ")" (or -1 when the
+// call isn't closed yet). callee is the (possibly dotted) name in front of the "(",
+// e.g. "FEllipse" or "text.set_position"; argText is the raw text between "(" and the
+// matching ")" (or the caret, when the call isn't closed yet).
+struct EnclosingCall {
+    bool valid = false;
+    int openPos = -1;
+    int closePos = -1;
+    QString callee;
+    QString argText;
+};
+
 class PythonCodeEditor : public SearchTextEdit {
     Q_OBJECT
 
@@ -62,6 +81,13 @@ public:
     void setEditorFont(const QFont &font);
     int lineNumberAreaWidth() const;
     void lineNumberAreaPaintEvent(QPaintEvent *event);
+
+    // Configure this editor as a single-line value field for the parameter panel: no gutter,
+    // no wrapping, one line tall, Enter is swallowed. contextEditor is the script this value
+    // belongs to, consulted so the field's autocomplete sees that script's variables. When
+    // plainText is true the field is a literal-text input (e.g. a str argument): no syntax
+    // highlighting and no member autocomplete, so what you type is taken verbatim.
+    void enableValueFieldMode(PythonCodeEditor *contextEditor, bool plainText = false);
 
     // Red wavy underlines for lines that produced a Python error in the last
     // run/preview, keyed by 1-based line number (matching the editor gutter and
@@ -146,18 +172,25 @@ private:
     QTimer *m_docHideTimer = nullptr;   // debounces hiding the hover box as the mouse moves
     bool m_docBoxHovered = false;       // mouse is currently over the box itself
     // The method token currently described by the *hover* box, so we don't rebuild/
-    // flicker while the pointer rests on the same word. (-1 = none.)
+    // flicker while the pointer rests on the same word. For an error-only hover (no API
+    // token) the span is (-1,-1) and m_hoverDocBlock is the error line's block number.
     int m_hoverDocBlock = -1;
     int m_hoverDocStart = -1;
     int m_hoverDocEnd   = -1;
+    // The error message currently shown in the hover box (empty = none). Part of the
+    // rebuild key so the box stays put while the pointer rests on the same error line.
+    QString m_hoverErrorMsg;
 
     // Show the doc box for a resolved entry: showCompletionDocFor() looks up <completion
     // class, member> (or a class constructor) and anchors the box beside the completion
     // popup (non-interactive); showHoverDoc() takes an already-resolved name+MemberInfo
-    // (a method/attribute or a class constructor) and anchors it at the mouse, letting the
-    // user click to expand. hideCompletionDoc() hides + resets state.
+    // (a method/attribute or a class constructor) plus an optional error message, and anchors
+    // it at the mouse, letting the user click to expand. When name is empty the box shows the
+    // error alone; when errorMsg is empty it shows the doc alone; both shows error-over-doc.
+    // hideCompletionDoc() hides + resets state.
     void showCompletionDocFor(const QString &member);
-    void showHoverDoc(const QString &name, const MemberInfo &info, const QPoint &globalPos);
+    void showHoverDoc(const QString &name, const MemberInfo &info,
+                      const QString &errorMsg, const QPoint &globalPos);
     void hideCompletionDoc();
     // Hover plumbing: resolve the token under the mouse and (un)schedule hiding.
     void maybeShowHoverDoc(const QPoint &viewportPos, const QPoint &globalPos);
@@ -184,14 +217,72 @@ private:
     static QMap<QString, MemberInfo> s_classInfo;
     static bool s_tableBuilt;
 
+    // ---- Interactive parameter-input panel ---------------------------------------
+    // A focusable, frameless panel floated to the right of the caret whenever the caret
+    // sits inside the parentheses of a documented call. It lists every documented
+    // parameter with an input box + description; editing a field rewrites the whole argument
+    // list as "name=value" in signature order (the panel owns the parens while open, so any
+    // initial positional args are converted to keyword form). Defined in the .cpp (no Q_OBJECT).
+    ParamPanel *m_paramPanel = nullptr;
+    // Anchored at the bound call's "(" so its position stays valid as the document is
+    // edited; an invalid (isNull) cursor means no call is currently bound.
+    QTextCursor m_callOpenCursor;
+    // Anchored at the bound call's ")" (isNull when the call isn't closed). Bounds the
+    // argument scan in applyParamEdit so a value with an unbalanced "(" can never make the
+    // scan — and the resulting rewrite — run past the call into the rest of the document.
+    QTextCursor m_callCloseCursor;
+    // Identifies the bound call ("<callee>@<openParenPos>") so a caret move within the
+    // same call re-syncs the fields instead of rebuilding (which would drop field focus).
+    QString m_callKey;
+    // Documented parameter names in signature order, for mapping positional arguments.
+    QStringList m_callParamOrder;
+    // Set while the panel writes into the document, so the resulting cursor move / edit
+    // doesn't recursively rebuild the panel.
+    bool m_paramWriteGuard = false;
+    QTimer *m_paramHideTimer = nullptr;   // grace period before hiding (lets the pointer/focus travel to the panel)
+
+    // Value-field mode: set when this editor IS one of the parameter panel's input boxes
+    // (see enableValueFieldMode). m_contextEditor is the script the value belongs to, used so
+    // the field's autocomplete/type-inference resolves the script's variables, not its own
+    // (single-expression) text.
+    bool m_valueFieldMode = false;
+    bool m_plainField = false;          // value field with no highlighting/autocomplete (e.g. a str arg)
+    PythonCodeEditor *m_contextEditor = nullptr;
+
+    // Locate the call whose parentheses enclose caretPos (pure text scan; tracks strings
+    // and comments so brackets inside them don't count). See EnclosingCall.
+    EnclosingCall findEnclosingCall(int caretPos) const;
+    // Resolve a callee expression to its documented MemberInfo: a class constructor
+    // (s_classInfo) or a method on a typed receiver (inferType -> s_members). Returns
+    // false when the callee isn't documented; on success fills the display name
+    // (e.g. "FEllipse") and a copy of the MemberInfo.
+    bool resolveCallee(const QString &callee, QString *nameOut, MemberInfo *infoOut) const;
+    // Rewrite the bound call's entire argument list from the panel's current field values,
+    // as uniform "name=value" in signature order (the panel owns the parens while open, so
+    // positional args become keyword args and unmappable text is dropped). Replaces only the
+    // span between the anchored "(" and ")" cursors. The parameters are unused (the panel's
+    // field state is the source of truth) but kept so the field's textChanged can call it.
+    void applyParamEdit(const QString &param, const QString &value, bool cleared);
+    // Hide the parameter panel and clear its tracking state (unbind the current call).
+    void hideParamPanel();
+    // Close every pop-up this editor owns — the completion popup, the doc/description box, and
+    // the parameter panel (cascading into nested field panels). Used by Esc.
+    void closeAllPopups();
+    // True if w is inside this editor's parameter-panel subtree. Walks the QObject parent
+    // chain (which spans our separate tool windows) rather than QWidget::isAncestorOf, which
+    // is limited to a single window and so wrongly excludes nested-panel fields.
+    bool focusInPanelTree(QWidget *w) const;
+
 private slots:
     void updateLineNumberAreaWidth(int newBlockCount);
     void updateLineNumberArea(const QRect &rect, int dy);
     void highlightCurrentLine();
+    void updateParamPanel();   // show / re-sync / hide the parameter-input panel as the caret moves
     void insertCompletion(const QString &completion);   // fill the chosen method at the caret
 
     friend class LineNumberArea;
     friend class CompletionDocBox;
+    friend class ParamPanel;
 };
 
 class LineNumberArea : public QWidget {

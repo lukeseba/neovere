@@ -118,22 +118,32 @@
     preview(wait_for_exit: bool = False, title: str = "Frame Preview") -> None:
 #    Display the frame in a window for previewing.
 
-    crop(x1: int, y1: int, x2: int, y2: int) -> None:
+    crop(corner1: tuple, corner2: tuple) -> None:
 #    Crop the frame to a rectangle defined by two corners.
 #
 #    Parameters:
-#        x1 (int): Left (starting) x-coordinate.
-#        y1 (int): Top (starting) y-coordinate.
-#        x2 (int): Right (ending) x-coordinate.
-#        y2 (int): Bottom (ending) y-coordinate.
+#        corner1 (tuple) @position: (x, y) pixels of the top-left corner.
+#        corner2 (tuple) @position: (x, y) pixels of the bottom-right corner.
 #
 
 * class Color_Frame(Frame):
 #A class to represent and manipulate a frame composed of a single RGB color
 
     __init__(width: int, height: int, color: tuple = (0, 0, 0)):
+#    Create a frame filled with a single solid RGB color.
+#
+#    Parameters:
+#        width (int): Frame width in pixels.
+#        height (int): Frame height in pixels.
+#        color (tuple) @color: The fill color as an (r, g, b) tuple, each 0–255.
+#
 
     change_color(color: tuple) -> None:
+#    Replace the frame's fill color.
+#
+#    Parameters:
+#        color (tuple) @color: The new color as an (r, g, b) tuple, each 0–255.
+#
 
 * class Video:
 #A class to represent and manipulate a video file, including reading frames and extracting audio.

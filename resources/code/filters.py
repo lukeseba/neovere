@@ -84,20 +84,16 @@ if len(_paths) != 0:
     class Solid_Color(Filter):
         """A filter that overlays a solid color onto a Field-based mask."""
 
-        def __init__(self, r: int, g: int, b: int, field: Optional[Field] = None) -> None:
+        def __init__(self, color: tuple, field: Optional[Field] = None) -> None:
             """Initialize a Solid_Color filter.
 
             Parameters:
-                r (int): Red component of the color (0–255).
-                g (int): Green component of the color (0–255).
-                b (int): Blue component of the color (0–255).
+                color (tuple) @color: The overlay color as an (r, g, b) tuple, each 0–255.
                 field (Optional[Field]): Field object providing the overlay mask.
                     If None, a default FOverlay() field will be used.
             """
             super().__init__(field)
-            self.__r = r
-            self.__g = g
-            self.__b = b
+            self.__r, self.__g, self.__b = int(color[0]), int(color[1]), int(color[2])
 
         def invert(self) -> 'Solid_Color':
             """Invert the solid color (i.e., subtract each RGB component from 255).
@@ -155,21 +151,23 @@ if len(_paths) != 0:
     class Draw_Frame(Filter):
         """A filter that draws a frame onto an image at a specified position."""
 
-        def __init__(self, frame: Frame, x: Optional[int] = None, y: Optional[int] = None, field: Optional[Field] = None) -> None:
+        def __init__(self, frame: Frame, position: tuple = None, field: Optional[Field] = None) -> None:
             """Initialize a Draw_Frame filter.
 
             Parameters:
                 frame (Frame): The Frame object that will be drawn onto the image.
-                x (Optional[int]): The x-coordinate for positioning the frame. If None, the frame is centered.
-                y (Optional[int]): The y-coordinate for positioning the frame. If None, the frame is centered.
+                position (tuple) @position: (x, y) top-left pixel for the frame. If None, the frame is centered.
                 field (Optional[Field]): Field object providing the overlay mask. Defaults to FOverlay() if None.
             """
             if field is None:
                 field = FOverlay()
             super().__init__(field)
             self.frame = frame
-            self.x = x
-            self.y = y
+            if position is None:
+                self.x = None
+                self.y = None
+            else:
+                self.x, self.y = int(position[0]), int(position[1])
 
         def apply(self, pixels: np.ndarray) -> np.ndarray:
             """Apply the frame to the given pixels at the specified (x, y) position.
@@ -225,18 +223,16 @@ if len(_paths) != 0:
             # Blend with the field map
             return np.clip(m * new_frame + (1 - m) * pixels, 0, 255)
 
-        def set_position(self, x: int, y: int) -> 'Draw_Frame':
+        def set_position(self, position: tuple) -> 'Draw_Frame':
             """Updates the frame's position.
 
             Parameters:
-                x (int): The new x-coordinate for the frame.
-                y (int): The new y-coordinate for the frame.
+                position (tuple) @position: (x, y) top-left pixel for the frame.
 
             Returns:
                 Draw_Frame: The current instance with updated position.
             """
-            self.x = x
-            self.y = y
+            self.x, self.y = int(position[0]), int(position[1])
             return self
 
         def invert(self) -> 'Draw_Frame':

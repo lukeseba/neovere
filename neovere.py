@@ -32,7 +32,7 @@ arial = "C:/Users/luke/AppData/Local/Temp/arial-bold.ttf"
 
 api_key = "" #[%$# #$%]
 gpu_enabled = True
-dx = 1.0
+dx = 0.25
 dt = 1.0
 
 audio_counter = 0
@@ -300,15 +300,15 @@ class Frame:
         else:
             cv2.waitKey(1)
 
-    def crop(self, x1: int, y1: int, x2: int, y2: int) -> None:
+    def crop(self, corner1: tuple, corner2: tuple) -> None:
         """Crop the frame to a rectangle defined by two corners.
 
         Parameters:
-            x1 (int): Left (starting) x-coordinate.
-            y1 (int): Top (starting) y-coordinate.
-            x2 (int): Right (ending) x-coordinate.
-            y2 (int): Bottom (ending) y-coordinate.
+            corner1 (tuple) @position: (x, y) pixels of the top-left corner.
+            corner2 (tuple) @position: (x, y) pixels of the bottom-right corner.
         """
+        x1, y1 = int(corner1[0]), int(corner1[1])
+        x2, y2 = int(corner2[0]), int(corner2[1])
         x1 = max(0, min(x1, self._width))
         y1 = max(0, min(y1, self._height))
         x2 = max(0, min(x2, self._width))
@@ -324,6 +324,13 @@ class Color_Frame(Frame):
     """A class to represent and manipulate a frame composed of a single RGB color"""
 
     def __init__(self, width: int, height: int, color: tuple = (0, 0, 0)):
+        """Create a frame filled with a single solid RGB color.
+
+        Parameters:
+            width (int): Frame width in pixels.
+            height (int): Frame height in pixels.
+            color (tuple) @color: The fill color as an (r, g, b) tuple, each 0–255.
+        """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
             raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
@@ -335,6 +342,11 @@ class Color_Frame(Frame):
         super().__init__(pixels)
 
     def change_color(self, color: tuple) -> None:
+        """Replace the frame's fill color.
+
+        Parameters:
+            color (tuple) @color: The new color as an (r, g, b) tuple, each 0–255.
+        """
         if not (isinstance(color, tuple) and len(color) == 3 and
                 all(isinstance(c, int) and 0 <= c <= 255 for c in color)):
             raise ValueError("Color must be a tuple of three integers (R, G, B) between 0 and 255.")
@@ -2791,12 +2803,19 @@ if len(_paths) != 0:
             x0, y0, x1, y1 = bbox
             return (x0 + x1) / 2.0, (y0 + y1) / 2.0
 
-        def move(self, dx: float, dy: float) -> 'Field':
-            """Translate the field by (dx, dy) pixels."""
-            off = rnp.array([float(dx), float(dy)], dtype=rnp.float32)
+        def set_position(self, position: tuple) -> 'Field':
+            """Move the field so its center sits at the given point.
+
+            Parameters:
+                position (tuple) @position: (x, y) pixel coordinates for the field's center.
+            """
+            cx, cy = self._content_center()
+            x, y = float(position[0]), float(position[1])
+            dx, dy = x - cx, y - cy
+            off = rnp.array([dx, dy], dtype=rnp.float32)
             for s in self.shapes:
                 if s.get('type') == 'raster':
-                    M = rnp.float32([[1, 0, float(dx)], [0, 1, float(dy)]])
+                    M = rnp.float32([[1, 0, dx], [0, 1, dy]])
                     s['mask'] = cv2.warpAffine(s['mask'], M, (self._ref_w, self._ref_h),
                                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
                 else:
@@ -2972,7 +2991,16 @@ if len(_paths) != 0:
 
     class FOverlay(Field):
         def __init__(self, opacity: float = 1.0) -> None:
-            """A uniform whole-canvas field at the given opacity (0..1)."""
+            """A uniform field covering the entire canvas at a constant opacity.
+
+            Handy as a solid base layer or a tint: feed it to a color filter to
+            flood the frame, or lower its opacity to dim whatever sits behind it.
+
+            Parameters:
+                opacity (float): Fill strength from 0.0 (fully transparent) to
+                    1.0 (fully opaque). Defaults to 1.0. Values outside 0..1
+                    raise a ValueError.
+            """
             if not (0.0 <= opacity <= 1.0):
                 raise ValueError(f"Opacity must be between 0 and 1, but got {opacity}.")
             super().__init__()
@@ -2980,12 +3008,23 @@ if len(_paths) != 0:
 
 
     class FLine(Field):
-        def __init__(self, x1: float, y1: float, x2: float, y2: float, thickness: float) -> None:
-            """A straight line of the given thickness, stored as a vector rectangle."""
+        def __init__(self, start: tuple, end: tuple, thickness: float) -> None:
+            """A straight line segment of fixed thickness, stored as a vector rectangle.
+
+            The line runs from start to end; its thickness is added evenly to both
+            sides of that center line.
+
+            Parameters:
+                start (tuple) @position: (x, y) pixel coordinates of the start point.
+                end (tuple) @position: (x, y) pixel coordinates of the end point.
+                thickness (float): Line width in pixels, centered on the segment.
+                    Must be greater than 0.
+            """
             if thickness <= 0:
                 raise ValueError(f"Thickness must be a positive number, but got {thickness}.")
             super().__init__()
-            x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+            x1, y1 = float(start[0]), float(start[1])
+            x2, y2 = float(end[0]), float(end[1])
             half = float(thickness) / 2.0
             dx, dy = x2 - x1, y2 - y1
             length = (dx * dx + dy * dy) ** 0.5
@@ -3005,12 +3044,24 @@ if len(_paths) != 0:
 
 
     class FRect(Field):
-        def __init__(self, x1: float, y1: float, x2: float, y2: float, thickness: int = -1) -> None:
-            """A rectangle. ``thickness == -1`` fills it; otherwise draws a border ring."""
+        def __init__(self, corner1: tuple, corner2: tuple, thickness: int = -1) -> None:
+            """A rectangle, either filled solid or drawn as a hollow border ring.
+
+            The two corners may be given in any order; the rectangle spans the
+            bounding box between them.
+
+            Parameters:
+                corner1 (tuple) @position: (x, y) pixel coordinates of one corner.
+                corner2 (tuple) @position: (x, y) pixel coordinates of the opposite corner.
+                thickness (int): Border width in pixels, centered on the edges.
+                    Use -1 (the default) to fill the rectangle solid; any other
+                    value must be positive.
+            """
             if thickness != -1 and thickness <= 0:
                 raise ValueError(f"Thickness must be a positive number or -1 to fill, but got {thickness}.")
             super().__init__()
-            x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+            x1, y1 = float(corner1[0]), float(corner1[1])
+            x2, y2 = float(corner2[0]), float(corner2[1])
             ax, bx = min(x1, x2), max(x1, x2)
             ay, by = min(y1, y2), max(y1, y2)
             if thickness == -1:
@@ -3036,7 +3087,19 @@ if len(_paths) != 0:
                 angle: float = 0,
                 thickness: int = -1
         ) -> None:
-            """An ellipse, approximated as a vector polygon (filled or a border ring)."""
+            """An ellipse, approximated as a vector polygon, filled or as a border ring.
+
+            Parameters:
+                center (tuple) @position: (x, y) pixel coordinates of the ellipse's center.
+                ellipse_width (float): Full width (horizontal diameter) in pixels,
+                    measured before any rotation.
+                ellipse_height (float): Full height (vertical diameter) in pixels,
+                    measured before any rotation.
+                angle (float): Clockwise rotation of the ellipse, in degrees.
+                    Defaults to 0.
+                thickness (int): Border width in pixels. Use -1 (the default) to
+                    fill the ellipse solid; any other value must be positive.
+            """
             if thickness != -1 and thickness <= 0:
                 raise ValueError(f"Thickness must be a positive number or -1 to fill, but got {thickness}.")
             super().__init__()
@@ -3057,7 +3120,14 @@ if len(_paths) != 0:
 
     class FPoly(Field):
         def __init__(self, points: np.ndarray) -> None:
-            """A filled polygon from an array of (x, y) vertices."""
+            """A filled polygon defined by an ordered list of (x, y) vertices.
+
+            Parameters:
+                points (np.ndarray): Vertex coordinates as an (N, 2) array or a
+                    flat sequence of x, y pairs, in pixels. At least 3 vertices
+                    are required; the outline closes automatically from the last
+                    vertex back to the first.
+            """
             pts = points.get() if hasattr(points, 'get') else rnp.asarray(points)
             pts = pts.reshape(-1, 2)
             if pts.shape[0] < 3:
@@ -3075,7 +3145,22 @@ if len(_paths) != 0:
                 thickness: int = 1,
                 custom_font: str = None
         ) -> None:
-            """Text, rendered once to a bitmap and then vectorized into contours."""
+            """Text rendered once to a bitmap, then traced into vector contours.
+
+            Because the glyphs become contours, the result behaves like any other
+            vector field and can be moved, scaled, cropped, and so on.
+
+            Parameters:
+                text (str): The string to render.
+                position (tuple) @position: (x, y) pixel coordinates of the text's center.
+                font_scale (float): Glyph size multiplier. With a custom font this
+                    maps to a pixel height; with the built-in font it is OpenCV's
+                    font scale.
+                thickness (int): Stroke width in pixels for the built-in font.
+                    Defaults to 1. Ignored when custom_font is supplied.
+                custom_font (str): Path to a .ttf/.otf font file, rendered via
+                    Pillow. Defaults to None, which uses the built-in OpenCV font.
+            """
             super().__init__()
             mask = rnp.zeros((self._ref_h, self._ref_w), dtype=rnp.uint8)
             if custom_font:
@@ -3115,7 +3200,18 @@ if len(_paths) != 0:
 
     class FAudio(Field):
         def __init__(self, aud: FrameAudio, start: int = 0, end: int = None) -> None:
-            """Visualize an audio frame's spectrum as vector bars plus a volume bar."""
+            """Visualize an audio frame's frequency spectrum as a bar graph.
+
+            Builds a full-canvas bar graph from the frame's frequency magnitudes,
+            with a separate bar on the right showing the overall volume.
+
+            Parameters:
+                aud (FrameAudio): The audio frame to visualize; supplies the
+                    per-frequency magnitudes and the overall volume.
+                start (int): Lowest frequency to include, in hertz. Defaults to 0.
+                end (int): Highest frequency to include, in hertz. Defaults to
+                    None, which extends to the highest available frequency.
+            """
             super().__init__()
 
             try:
@@ -3162,10 +3258,9 @@ if len(_paths) != 0:
 
                 # Add the volume indicator as a rectangle
                 self.add(FRect(
-                    renderer.width() - bar_width,
-                    renderer.height() - aud.get_volume() * renderer.height(),
-                    renderer.width(),
-                    renderer.height()
+                    (renderer.width() - bar_width,
+                     renderer.height() - aud.get_volume() * renderer.height()),
+                    (renderer.width(), renderer.height())
                 ))
 
             except ValueError as ve:
@@ -3294,20 +3389,16 @@ if len(_paths) != 0:
     class Solid_Color(Filter):
         """A filter that overlays a solid color onto a Field-based mask."""
 
-        def __init__(self, r: int, g: int, b: int, field: Optional[Field] = None) -> None:
+        def __init__(self, color: tuple, field: Optional[Field] = None) -> None:
             """Initialize a Solid_Color filter.
 
             Parameters:
-                r (int): Red component of the color (0–255).
-                g (int): Green component of the color (0–255).
-                b (int): Blue component of the color (0–255).
+                color (tuple) @color: The overlay color as an (r, g, b) tuple, each 0–255.
                 field (Optional[Field]): Field object providing the overlay mask.
                     If None, a default FOverlay() field will be used.
             """
             super().__init__(field)
-            self.__r = r
-            self.__g = g
-            self.__b = b
+            self.__r, self.__g, self.__b = int(color[0]), int(color[1]), int(color[2])
 
         def invert(self) -> 'Solid_Color':
             """Invert the solid color (i.e., subtract each RGB component from 255).
@@ -3365,21 +3456,23 @@ if len(_paths) != 0:
     class Draw_Frame(Filter):
         """A filter that draws a frame onto an image at a specified position."""
 
-        def __init__(self, frame: Frame, x: Optional[int] = None, y: Optional[int] = None, field: Optional[Field] = None) -> None:
+        def __init__(self, frame: Frame, position: tuple = None, field: Optional[Field] = None) -> None:
             """Initialize a Draw_Frame filter.
 
             Parameters:
                 frame (Frame): The Frame object that will be drawn onto the image.
-                x (Optional[int]): The x-coordinate for positioning the frame. If None, the frame is centered.
-                y (Optional[int]): The y-coordinate for positioning the frame. If None, the frame is centered.
+                position (tuple) @position: (x, y) top-left pixel for the frame. If None, the frame is centered.
                 field (Optional[Field]): Field object providing the overlay mask. Defaults to FOverlay() if None.
             """
             if field is None:
                 field = FOverlay()
             super().__init__(field)
             self.frame = frame
-            self.x = x
-            self.y = y
+            if position is None:
+                self.x = None
+                self.y = None
+            else:
+                self.x, self.y = int(position[0]), int(position[1])
 
         def apply(self, pixels: np.ndarray) -> np.ndarray:
             """Apply the frame to the given pixels at the specified (x, y) position.
@@ -3435,18 +3528,16 @@ if len(_paths) != 0:
             # Blend with the field map
             return np.clip(m * new_frame + (1 - m) * pixels, 0, 255)
 
-        def set_position(self, x: int, y: int) -> 'Draw_Frame':
+        def set_position(self, position: tuple) -> 'Draw_Frame':
             """Updates the frame's position.
 
             Parameters:
-                x (int): The new x-coordinate for the frame.
-                y (int): The new y-coordinate for the frame.
+                position (tuple) @position: (x, y) top-left pixel for the frame.
 
             Returns:
                 Draw_Frame: The current instance with updated position.
             """
-            self.x = x
-            self.y = y
+            self.x, self.y = int(position[0]), int(position[1])
             return self
 
         def invert(self) -> 'Draw_Frame':

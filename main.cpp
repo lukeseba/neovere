@@ -69,6 +69,7 @@ QProcess* pythonWorker = nullptr;
 QByteArray workerOutBuffer;
 std::function<void(bool)> workerOnFinished;
 FrameBufferReader* g_frameBuffer = nullptr;       // shared-memory frame buffer reader (frame-buffer mode)
+int g_previewFrameIndex = 0;                      // frame index last shown in the preview (for the @position picker)
 TabsWidget* g_mediaHeader = nullptr;              // for updating the preview tab's "[updating]" indicator
 PythonCodeEditor* g_codeEditor = nullptr;         // main user-script editor, for red error underlines
 QMap<int, LineError> g_errMap;                    // 1-based line -> error span+message (editor underlines)
@@ -856,6 +857,7 @@ void startPythonWorker(QPlainTextEdit* outputDisplay, TabsWidget* mediaHeader, M
                     // doesn't immediately re-request the identical frame.
                     lastDisplayedFrame = mediaPanel->fbController()
                         ? mediaPanel->fbController()->currentFrame() : 0;
+                    g_previewFrameIndex = lastDisplayedFrame;   // for the @position picker's frame view
                     pendingFrameIndex = -1;
                 }
             } else if (line.startsWith("<<<NEO_STANDARD_AUDIO ")) {
@@ -1314,8 +1316,10 @@ QString documentPython(QString docName) {
             QRegularExpression classRegex("^\\s*class\\s+(\\w+)\\s*(\\([^)]*\\))?");
             QRegularExpressionMatch classMatch = classRegex.match(line);
 
-            // Detect method with parameters and optional return type
-            QRegularExpression methodRegex("^\\s*def\\s+(\\w+)\\s*(\\(.*\\))\\s*(->\\s*[^:]*)?:");
+            // Detect a method definition. The signature may span several lines (one
+            // parameter per line, as FEllipse/FText do), so match just the opening
+            // "def name(" here; the parameter text is accumulated to its closing ")" below.
+            QRegularExpression methodRegex("^\\s*def\\s+(\\w+)\\s*\\((.*)$");
             QRegularExpressionMatch methodMatch = methodRegex.match(line);
 
             if (classMatch.hasMatch()) {
@@ -1346,38 +1350,61 @@ QString documentPython(QString docName) {
 
             if (methodMatch.hasMatch()) {
                 QString methodName = methodMatch.captured(1);
-                // Skip private methods or methods starting with a single '_', but not '__init__'
-                if (methodName.startsWith("_") && !methodName.startsWith("__init__")) {
-                    continue;  // Skip this method entirely
+
+                // The parameter list may span several lines (FEllipse/FText put one
+                // parameter per line). Accumulate the text after the opening "(" until its
+                // matching ")" closes, reading further lines as needed, so a multi-line
+                // signature is captured whole instead of being dropped (which left those
+                // constructors with no documented "__init__" line at all).
+                QString acc = methodMatch.captured(2);
+                int depth = 1, closeIdx = -1, scanFrom = 0;
+                for (;;) {
+                    for (int k = scanFrom; k < acc.size(); ++k) {
+                        if (acc.at(k) == '(') ++depth;
+                        else if (acc.at(k) == ')' && --depth == 0) { closeIdx = k; break; }
+                    }
+                    if (closeIdx >= 0 || in.atEnd()) break;
+                    scanFrom = acc.size() + 1;   // resume past the newline appended below
+                    acc += "\n";
+                    acc += in.readLine();
                 }
 
-                QString parameters = methodMatch.captured(2);
-                QString returnType = methodMatch.captured(3);
+                // Skip private methods (but never __init__) — done after consuming the
+                // whole signature so its continuation lines aren't reparsed as code.
+                if (methodName.startsWith("_") && !methodName.startsWith("__init__")) {
+                    continue;
+                }
 
                 // Always indent function signatures by 4 spaces
                 int indent = 4;
 
-                // Clean parameters: remove "self" if present
-                parameters = parameters.trimmed();
-                if (parameters.startsWith("(") && parameters.endsWith(")")) {
-                    QString innerParams = parameters.mid(1, parameters.length() - 2).trimmed();
-                    QStringList paramList = innerParams.split(",", Qt::SkipEmptyParts);
-
-                    // Remove 'self' from param list
-                    QStringList cleanedParams;
-                    for (QString param : paramList) {
-                        param = param.trimmed();
-                        if (param != "self") {
-                            cleanedParams.append(param);
-                        }
+                // Inner parameter text, flattened to one line, with "self" dropped.
+                QString innerParams = (closeIdx >= 0) ? acc.left(closeIdx) : acc;
+                innerParams.replace(QRegularExpression("\\s+"), " ");
+                innerParams = innerParams.trimmed();
+                QStringList cleanedParams;
+                for (QString param : innerParams.split(",", Qt::SkipEmptyParts)) {
+                    param = param.trimmed();
+                    if (!param.isEmpty() && param != "self") {
+                        cleanedParams.append(param);
                     }
+                }
+                QString parameters = "(" + cleanedParams.join(", ") + ")";
 
-                    parameters = "(" + cleanedParams.join(", ") + ")";
+                // Return annotation: the "-> ..." between the closing ")" and the ":".
+                QString returnType;
+                if (closeIdx >= 0) {
+                    int arrow = acc.indexOf("->", closeIdx);
+                    if (arrow >= 0) {
+                        int colon = acc.indexOf(':', arrow);
+                        returnType = (colon >= 0 ? acc.mid(arrow, colon - arrow)
+                                                 : acc.mid(arrow)).trimmed();
+                    }
                 }
 
                 QString signature = methodName + parameters;
                 if (!returnType.isEmpty()) {
-                    signature += " " + returnType.trimmed();
+                    signature += " " + returnType;
                 }
                 signature += ":";
 

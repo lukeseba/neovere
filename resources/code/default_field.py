@@ -12,8 +12,8 @@ class FCustom(Field):
 
         # Example: a rectangle covering the centre of the canvas.
         self.add(FRect(
-            renderer.width() * 0.25, renderer.height() * 0.25,
-            renderer.width() * 0.75, renderer.height() * 0.75
+            (renderer.width() * 0.25, renderer.height() * 0.25),
+            (renderer.width() * 0.75, renderer.height() * 0.75)
         ))
 
         # self.feather(15)   # soften the shape's edges (reversible)
