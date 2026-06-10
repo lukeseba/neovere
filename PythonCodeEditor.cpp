@@ -1118,10 +1118,28 @@ public:
             rl->setContentsMargins(0, 0, 0, 0);
             rl->setSpacing(2);
 
-            auto *h = new QLabel(row);              // text (name + type + optional) set by refreshRow
+            // Header line: the parameter name (+ type / optional) on the left, and for an
+            // interpreted field (str / tuple / colour / position / bool) a right-aligned "plain"
+            // toggle. Checking it swaps the interpreted widget(s) for one verbatim code field whose
+            // text goes into the call exactly as typed — no quotes, no parens, no comma-splitting.
+            const bool interpretive = (kind != 0);   // kind 0 is already a verbatim expression
+            auto *headerLine = new QWidget(row);
+            auto *hh = new QHBoxLayout(headerLine);
+            hh->setContentsMargins(0, 0, 0, 0);
+            hh->setSpacing(6);
+            auto *h = new QLabel(headerLine);       // text (name + type + optional) set by refreshRow
             h->setTextFormat(Qt::RichText);
             h->setFont(m_sigFont);
-            rl->addWidget(h);
+            hh->addWidget(h, 1);
+            QCheckBox *plainToggle = nullptr;
+            if (interpretive) {
+                plainToggle = new QCheckBox(QStringLiteral("plain"), headerLine);
+                plainToggle->setFont(m_bodyFont);
+                plainToggle->setStyleSheet("color:#9A9AA8; background:transparent;");
+                plainToggle->setFocusPolicy(Qt::NoFocus);   // clicking mustn't steal field focus
+                hh->addWidget(plainToggle, 0, Qt::AlignRight | Qt::AlignTop);
+            }
+            rl->addWidget(headerLine);
 
             Row r;
             r.name = pi.name;
@@ -1130,6 +1148,7 @@ public:
             r.isPos = isPos;
             r.header = h;
             r.container = row;
+            r.plainToggle = plainToggle;
             r.annotation = pi.annotation;
             r.defaultVal = pi.defaultVal;
             r.optional = !pi.defaultVal.isEmpty();   // a default value => the argument is optional
@@ -1141,6 +1160,7 @@ public:
                 cb->setStyleSheet("color:#1A1A28; background:transparent;");
                 rl->addWidget(cb);
                 r.checkbox = cb;
+                r.inputWidgets.append(cb);
             } else if (kind == 2) {
                 // Tuple sub-fields: colour rows show r/g/b; position rows show x/y (2 only);
                 // any other tuple shows x/y/z.
@@ -1161,6 +1181,7 @@ public:
                     hl->addWidget(e, 1);
                     rl->addWidget(sub);
                     r.edits.append(e);
+                    r.inputWidgets.append(sub);
                 }
             } else {
                 // Plain expression, or a str literal (plain-text field). A str default is shown
@@ -1173,6 +1194,16 @@ public:
                 PythonCodeEditor *e = makeFieldEditor(row, ctx, /*plain*/kind == 1, ph);
                 rl->addWidget(e);
                 r.edits.append(e);
+                r.inputWidgets.append(e);
+            }
+
+            // Verbatim "plain" field (interpreted rows only): hidden until the toggle is checked,
+            // then it replaces the interpreted widget(s) and its text is written through unchanged.
+            if (interpretive) {
+                PythonCodeEditor *pe = makeFieldEditor(row, ctx, /*plain*/false, QString());
+                pe->setVisible(false);
+                rl->addWidget(pe);
+                r.plainEdit = pe;
             }
 
             if (!desc.isEmpty()) {
@@ -1218,6 +1249,19 @@ public:
                     m_editor->applyParamEdit(QString(), QString(), false);
                 });
             }
+            // The verbatim field writes straight through; recolour the name + rewrite on each edit.
+            if (r.plainEdit) {
+                QObject::connect(r.plainEdit, &QPlainTextEdit::textChanged, r.plainEdit, [this, idx]() {
+                    refreshRow(idx);
+                    m_editor->applyParamEdit(QString(), QString(), false);
+                });
+            }
+            // The "plain" toggle swaps a row between its interpreted widget(s) and the verbatim field.
+            if (r.plainToggle) {
+                QObject::connect(r.plainToggle, &QCheckBox::toggled, r.plainToggle, [this, idx](bool on) {
+                    setRowPlain(idx, on);
+                });
+            }
         }
         return true;
     }
@@ -1251,8 +1295,10 @@ public:
         if (m_posPicker) m_posPicker->hide();
         m_pickerRow = -1;
         m_posRow = -1;
-        for (int i = 0; i < m_rows.size(); ++i)
+        for (int i = 0; i < m_rows.size(); ++i) {
             for (PythonCodeEditor *e : m_rows.at(i).edits) e->closeAllPopups();
+            if (m_rows.at(i).plainEdit) m_rows.at(i).plainEdit->closeAllPopups();
+        }
     }
 
     void showAt(const QPoint &globalCaret) {
@@ -1293,7 +1339,12 @@ private:
                 e->closeAllPopups();
                 e->blockSignals(true);
             }
-            if (m_rows.at(i).checkbox) m_rows.at(i).checkbox->blockSignals(true);
+            if (m_rows.at(i).plainEdit) {
+                m_rows.at(i).plainEdit->closeAllPopups();
+                m_rows.at(i).plainEdit->blockSignals(true);
+            }
+            if (m_rows.at(i).checkbox)    m_rows.at(i).checkbox->blockSignals(true);
+            if (m_rows.at(i).plainToggle) m_rows.at(i).plainToggle->blockSignals(true);
             delete m_rows.at(i).container;
         }
         m_rows.clear();
@@ -1304,7 +1355,9 @@ private:
     void refreshRow(int i) {
         const Row &r = m_rows.at(i);
         bool filled;
-        if (r.kind == 3) {
+        if (r.plain) {
+            filled = r.plainEdit && !r.plainEdit->toPlainText().trimmed().isEmpty();
+        } else if (r.kind == 3) {
             // A bool is "in use" (dark) when it will be emitted — i.e. it differs from its
             // default, or it's required. Mirror the value as the checkbox's own text.
             const bool checked = r.checkbox && r.checkbox->isChecked();
@@ -1362,6 +1415,8 @@ private:
     // Takes the row index (not a Row&) so Row needn't be declared before this point.
     QString encodeRow(int i) const {
         const Row &r = m_rows.at(i);
+        if (r.plain)                             // "plain": written exactly as typed, no encoding
+            return r.plainEdit ? r.plainEdit->toPlainText().trimmed() : QString();
         if (r.kind == 3) {                       // bool: True/False, omitted when at the default
             const bool checked = r.checkbox && r.checkbox->isChecked();
             const bool hasDefault = !r.defaultVal.isEmpty();
@@ -1395,6 +1450,10 @@ private:
     // Decode an argument's source into a row's field(s): the inverse of encodeRow.
     void setRowFromCode(int i, const QString &code) {
         const Row &r = m_rows.at(i);
+        if (r.plain) {                           // verbatim field mirrors the raw argument text
+            if (r.plainEdit) setFieldText(r.plainEdit, code.trimmed());
+            return;
+        }
         if (r.kind == 3) {                       // bool: check from the arg, else from the default
             const QString t = code.trimmed();
             const bool checked = t.isEmpty() ? (r.defaultVal.trimmed() == QLatin1String("True"))
@@ -1427,6 +1486,33 @@ private:
         }
     }
 
+    // Toggle a row between its interpreted widget(s) and the single verbatim code field. Entering
+    // plain seeds that field with the current encoded value (so nothing is lost); leaving it parses
+    // the text back into the interpreted widget(s). Either way the call is rewritten and the panel
+    // re-measured (the row's height changes), and any picker bound to the row is dismissed.
+    void setRowPlain(int i, bool on) {
+        if (i < 0 || i >= m_rows.size()) return;
+        Row &r = m_rows[i];
+        if (!r.plainEdit || r.plain == on) return;
+        if (on) {
+            const QString code = encodeRow(i);          // r.plain still false -> interpreted form
+            r.plain = true;
+            setFieldText(r.plainEdit, code);
+            if (m_colorPicker && m_pickerRow == i) { m_colorPicker->hide(); m_pickerRow = -1; }
+            if (m_posPicker   && m_posRow == i)    { m_posPicker->hide();   m_posRow = -1; }
+        } else {
+            const QString code = r.plainEdit->toPlainText();
+            r.plain = false;
+            setRowFromCode(i, code);                     // r.plain now false -> interpreted decode
+        }
+        for (QWidget *w : r.inputWidgets) w->setVisible(!on);
+        r.plainEdit->setVisible(on);
+        refreshRow(i);
+        relayout();                                      // the row's height changed
+        reposition();
+        m_editor->applyParamEdit(QString(), QString(), false);
+    }
+
     // ---- colour-picker helpers ---------------------------------------------------------
     static int fieldInt(PythonCodeEditor *e) {
         bool ok = false;
@@ -1438,7 +1524,7 @@ private:
     int colorRowOf(QWidget *w) const {
         if (!w) return -1;
         for (int i = 0; i < m_rows.size(); ++i) {
-            if (!m_rows.at(i).isColor) continue;
+            if (!m_rows.at(i).isColor || m_rows.at(i).plain) continue;   // plain row: no picker
             for (PythonCodeEditor *e : m_rows.at(i).edits)
                 if (e == w) return i;
         }
@@ -1463,7 +1549,7 @@ private:
     int posRowOf(QWidget *w) const {
         if (!w) return -1;
         for (int i = 0; i < m_rows.size(); ++i) {
-            if (!m_rows.at(i).isPos) continue;
+            if (!m_rows.at(i).isPos || m_rows.at(i).plain) continue;   // plain row: no picker
             for (PythonCodeEditor *e : m_rows.at(i).edits)
                 if (e == w) return i;
         }
@@ -1586,6 +1672,10 @@ private:
         QLabel *header = nullptr;
         QString annotation;
         bool optional = false;
+        bool plain = false;                       // "plain" toggle on: the field is written verbatim
+        QCheckBox *plainToggle = nullptr;         // the right-aligned "plain" checkbox (interpreted rows)
+        QList<QWidget *> inputWidgets;            // interpreted input widget(s), hidden while plain
+        PythonCodeEditor *plainEdit = nullptr;    // single verbatim code field, shown while plain
     };
 
     PythonCodeEditor *m_editor = nullptr;

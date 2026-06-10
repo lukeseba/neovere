@@ -1962,3 +1962,65 @@ class Bot:
             else:
                 i += 1
         return timestamps
+
+
+class Color:
+    """Convenience wrapper for choosing colors.
+
+    Color exists so the editor can offer its inline color picker wherever a color
+    is expected. It is not a real object to hold onto: calling Color((r, g, b))
+    simply hands back the plain (r, g, b) tuple you gave it, so
+    Solid_Color(Color((255, 0, 0))) behaves exactly like Solid_Color((255, 0, 0)).
+    """
+
+    def __new__(cls, color: tuple) -> tuple:
+        # Return the plain tuple, so Color(...) evaluates to a tuple rather than a
+        # Color instance. Returning a non-instance also means __init__ is never
+        # run — it exists only to document the argument for the editor's picker.
+        return tuple(color)
+
+    def __init__(self, color: tuple) -> None:
+        """Pick an (r, g, b) color with the inline color picker.
+
+        Clicking this field in the editor opens a saturation/value square and a
+        hue slider; the color you choose is written back here as an (r, g, b)
+        tuple. Color(...) returns that tuple unchanged, so it can be dropped
+        anywhere a color is expected.
+
+        Parameters:
+            color (tuple) @color: The color as an (r, g, b) tuple, each 0–255.
+
+        Returns:
+            tuple: The same (r, g, b) tuple, unchanged.
+        """
+
+
+class Position:
+    """Convenience wrapper for choosing on-screen positions.
+
+    Position exists so the editor can offer its inline position picker wherever a
+    point on the frame is expected. It is not a real object to hold onto: calling
+    Position((x, y)) simply hands back the plain (x, y) tuple you gave it, so it
+    can be dropped anywhere a position is expected.
+    """
+
+    def __new__(cls, position: tuple) -> tuple:
+        # Return the plain tuple, so Position(...) evaluates to a tuple rather than
+        # a Position instance. Returning a non-instance also means __init__ is
+        # never run — it exists only to document the argument for the editor.
+        return tuple(position)
+
+    def __init__(self, position: tuple) -> None:
+        """Pick an (x, y) position with the inline frame picker.
+
+        Clicking this field in the editor shows the current rendered frame with a
+        draggable point (and an absolute/relative toggle); the point you choose is
+        written back here as an (x, y) tuple. Position(...) returns that tuple
+        unchanged, so it can be dropped anywhere a position is expected.
+
+        Parameters:
+            position (tuple) @position: The position as an (x, y) pixel tuple.
+
+        Returns:
+            tuple: The same (x, y) tuple, unchanged.
+        """
