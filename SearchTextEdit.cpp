@@ -204,6 +204,9 @@ void SearchTextEdit::setColor(const QColor& color) {
         "}"
     ).arg(palette().color(QPalette::Mid).name(),
       m_focusBorderColor.name());
+    // Slim app-coloured scrollbars for every editor (script panel, AI panel, class
+    // editors, docs boxes) without reaching for an application-wide stylesheet.
+    editorStyle += neoScrollBarQss();
 
     QString searchBarStyle = QString(
         "QLineEdit {"

@@ -1738,6 +1738,16 @@ PythonCodeEditor::PythonCodeEditor(QWidget *parent)
     m_completer->popup()->setMouseTracking(true);
     m_completer->popup()->viewport()->setMouseTracking(true);
 
+    // The popup is a top-level window, so it inherits nothing from the editor. Give it
+    // the same cream/border treatment as the doc box that sits beside it, otherwise the
+    // pair renders half app-themed and half desktop-themed.
+    m_completer->popup()->setStyleSheet(
+        "QAbstractItemView { background:#FBFBF4; color:#1A1A28;"
+        "  border:1px solid #B7B7C4; border-radius:4px; padding:2px; outline:none; }"
+        "QAbstractItemView::item { padding:2px 6px; border-radius:3px; }"
+        "QAbstractItemView::item:hover { background:#E1E1F0; }"
+        "QAbstractItemView::item:selected { background:#C3AFD7; color:#1A1A28; }");
+
     // Hover doc: a short grace period before hiding so the pointer can travel from the
     // method onto the box (to click "More ▾") without it disappearing.
     m_docHideTimer = new QTimer(this);

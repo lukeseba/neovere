@@ -227,8 +227,16 @@ def _neo_emit_err(exc):
     except Exception:
         pass
 
+# Read the command stream as BYTES, not text. The host frames each dispatch as
+# "LEN:<n>\n" where n is the payload's UTF-8 BYTE count, but sys.stdin is a
+# TextIOWrapper whose read(n) counts CHARACTERS. Any non-ASCII in the user's
+# script (the stock templates contain an em dash) makes bytes > characters, so a
+# text-mode read(n) would block forever waiting for characters that were never
+# sent — the render hangs with no output and the UI stays stuck on "[updating]".
+_stdin = sys.stdin.buffer
+
 while True:
-    header = sys.stdin.readline()
+    header = _stdin.readline().decode("utf-8", "replace")
     if not header:
         break
 
@@ -260,7 +268,8 @@ while True:
         n = int(header[4:].strip())
     except ValueError:
         continue
-    script = sys.stdin.read(n)
+    # n is a byte count, so read exactly n bytes and decode them ourselves.
+    script = _stdin.read(n).decode("utf-8", "replace")
 
     # Reload neovere only when its file has actually changed since last render.
     # Otherwise reuse the imported module (preserving in-memory state like Video frame caches).
@@ -1613,6 +1622,23 @@ void updateDocumentationTextBox(const QString &classCatagory,
 }
 
 int main(int argc, char *argv[]) {
+#ifdef Q_OS_LINUX
+    // Prefer XWayland over native Wayland.
+    //
+    // The editor's pop-ups (the parameter panel and its nested panels, the colour /
+    // position pickers, the completion doc box) are Qt::Tool top-level windows that
+    // place themselves at the caret with move(). Wayland has no protocol for a client
+    // to position its own top-levels: move() is silently ignored and the compositor
+    // places the window instead — KWin centres it on its parent, so every pop-up lands
+    // in the same spot and they stack on each other rather than cascading. XWayland
+    // honours move(), so the pop-up system behaves there.
+    //
+    // This is only a default: an explicit QT_QPA_PLATFORM (or -platform on the command
+    // line, which Qt gives precedence to) still wins, and we leave things alone when
+    // there's no X server to fall back to.
+    if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM") && qEnvironmentVariableIsSet("DISPLAY"))
+        qputenv("QT_QPA_PLATFORM", "xcb");
+#endif
     QApplication app(argc, argv);
 
     // When running as a packaged build (Finder-opened .app, or a Windows
@@ -1683,18 +1709,48 @@ int main(int argc, char *argv[]) {
     window.resize(1200, 560);
 
     // Color Palette
-    QPalette palette = window.palette();
     QColor nvWhite = QColor(245, 245, 255);
     QColor nvMid = QColor(225, 225, 240);
     QColor nvPurple = QColor(195, 175, 215);
+    // Shared with the completion doc box / parameter panel, so popups all match.
+    const QColor nvCream(251, 251, 244);   // #FBFBF4 popup fill
+    const QColor nvBorder(183, 183, 196);  // #B7B7C4 popup border
+    const QColor nvInk(26, 26, 40);        // #1A1A28 body text
+
+    QPalette palette = window.palette();
     palette.setColor(QPalette::Window, nvWhite);
+    palette.setColor(QPalette::WindowText, nvInk);
     palette.setColor(QPalette::Button, Qt::white);
     palette.setColor(QPalette::ButtonText, Qt::black);
     palette.setColor(QPalette::Base, Qt::white);
+    palette.setColor(QPalette::AlternateBase, nvWhite);
     palette.setColor(QPalette::Text, Qt::black);
+    palette.setColor(QPalette::PlaceholderText, QColor(154, 154, 168));
+    // Frame/bevel roles. SearchTextEdit and AiTextBoxWrapper build their border
+    // colors from QPalette::Mid, so leaving it at the system value gave editors a
+    // desktop-themed (on a dark theme, near-black) outline.
+    palette.setColor(QPalette::Light, Qt::white);
+    palette.setColor(QPalette::Midlight, nvWhite);
+    palette.setColor(QPalette::Mid, nvMid);
+    palette.setColor(QPalette::Dark, nvBorder);
+    palette.setColor(QPalette::Shadow, nvBorder);
+    // Selection, in text edits and in the completion list.
+    palette.setColor(QPalette::Highlight, nvPurple);
+    palette.setColor(QPalette::HighlightedText, nvInk);
+    palette.setColor(QPalette::ToolTipBase, nvCream);
+    palette.setColor(QPalette::ToolTipText, nvInk);
 
+    // Popups (completion lists, tooltips, context menus, message boxes, combo
+    // drop-downs) are top-level windows, so a palette set only on `window` never
+    // reaches them and they render in the desktop theme. Apply it application-wide.
+    QApplication::setPalette(palette);
     window.setPalette(palette);
     window.setAutoFillBackground(true);
+
+    // Tooltips, menus and combo drop-downs pick their colors up from the palette above.
+    // Scrollbars do NOT — the platform style hard-codes those — so they get an explicit
+    // stylesheet, but strictly per-widget (see neoScrollBarQss in SearchTextEdit.h for
+    // why an application-wide stylesheet is not an option here).
 
     // Create a layout for the window
     QHBoxLayout *mainLayout = new QHBoxLayout(&window);
@@ -1807,6 +1863,7 @@ int main(int argc, char *argv[]) {
     // Create code output panel
     QPlainTextEdit *outputDisplay = new QPlainTextEdit;
     outputDisplay->setReadOnly(true);
+    outputDisplay->setStyleSheet(neoScrollBarQss());   // the editors get this via setColor()
     outputDisplay->setPlaceholderText("OUTPUT");
     outputDisplay->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding); // Set policy to expand vertically
 

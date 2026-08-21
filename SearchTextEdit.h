@@ -10,6 +10,24 @@
 #include <QVBoxLayout>
 #include <QShortcut>
 
+// Slim, app-coloured scrollbars, matching the ones the completion doc box and the
+// parameter panel already draw. Applied per-widget rather than through an
+// application-wide stylesheet: qApp->setStyleSheet() swaps every widget over to
+// QStyleSheetStyle and re-polishes the ones that already exist, which on Wayland
+// re-creates the parameter panel's surface and loses the position it was moved to
+// (the compositor then centres it on the parent window).
+inline const char *neoScrollBarQss() {
+    return "QScrollBar:vertical { background:transparent; width:8px; margin:0px; }"
+           "QScrollBar::handle:vertical { background:#C8C8D0; border-radius:4px; min-height:24px; }"
+           "QScrollBar::handle:vertical:hover { background:#B0B0BC; }"
+           "QScrollBar:horizontal { background:transparent; height:8px; margin:0px; }"
+           "QScrollBar::handle:horizontal { background:#C8C8D0; border-radius:4px; min-width:24px; }"
+           "QScrollBar::handle:horizontal:hover { background:#B0B0BC; }"
+           "QScrollBar::add-line, QScrollBar::sub-line { width:0px; height:0px; }"
+           "QScrollBar::add-page, QScrollBar::sub-page { background:transparent; }"
+           "QAbstractScrollArea::corner { background:transparent; }";
+}
+
 class SearchTextEdit : public QPlainTextEdit {
     Q_OBJECT
 
